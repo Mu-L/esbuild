@@ -820,7 +820,6 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 	if !opts.isTypeScriptDeclare {
 		name.Ref = p.declareSymbol(js_ast.SymbolTSEnum, nameLoc, nameText)
 		p.pushScopeForParsePass(js_ast.ScopeEntry, loc)
-		argRef = p.declareSymbol(js_ast.SymbolHoisted, nameLoc, nameText)
 	}
 	p.lexer.Expect(js_lexer.TOpenBrace)
 
@@ -834,7 +833,7 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 
 		// Parse the name
 		if p.lexer.Token == js_lexer.TStringLiteral {
-			value.Name = p.lexer.StringLiteral
+			value.Name = p.lexer.StringLiteral()
 		} else if p.lexer.IsIdentifierOrKeyword() {
 			value.Name = js_lexer.StringToUTF16(p.lexer.Identifier)
 		} else {
@@ -850,8 +849,7 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 		// Parse the initializer
 		if p.lexer.Token == js_lexer.TEquals {
 			p.lexer.Next()
-			initializer := p.parseExpr(js_ast.LComma)
-			value.Value = &initializer
+			value.ValueOrNil = p.parseExpr(js_ast.LComma)
 		}
 
 		values = append(values, value)
@@ -863,6 +861,45 @@ func (p *parser) parseTypeScriptEnumStmt(loc logger.Loc, opts parseStmtOpts) js_
 	}
 
 	if !opts.isTypeScriptDeclare {
+		// Avoid a collision with the enum closure argument variable if the
+		// enum exports a symbol with the same name as the enum itself:
+		//
+		//   enum foo {
+		//     foo = 123,
+		//     bar = foo,
+		//   }
+		//
+		// TypeScript generates the following code in this case:
+		//
+		//   var foo;
+		//   (function (foo) {
+		//     foo[foo["foo"] = 123] = "foo";
+		//     foo[foo["bar"] = 123] = "bar";
+		//   })(foo || (foo = {}));
+		//
+		// Whereas in this case:
+		//
+		//   enum foo {
+		//     bar = foo as any,
+		//   }
+		//
+		// TypeScript generates the following code:
+		//
+		//   var foo;
+		//   (function (foo) {
+		//     foo[foo["bar"] = foo] = "bar";
+		//   })(foo || (foo = {}));
+		//
+		if _, ok := p.currentScope.Members[nameText]; ok {
+			// Add a "_" to make tests easier to read, since non-bundler tests don't
+			// run the renamer. For external-facing things the renamer will avoid
+			// collisions automatically so this isn't important for correctness.
+			argRef = p.newSymbol(js_ast.SymbolHoisted, "_"+nameText)
+			p.currentScope.Generated = append(p.currentScope.Generated, argRef)
+		} else {
+			argRef = p.declareSymbol(js_ast.SymbolHoisted, nameLoc, nameText)
+		}
+
 		p.popScope()
 	}
 
@@ -896,7 +933,7 @@ func (p *parser) parseTypeScriptImportEqualsStmt(loc logger.Loc, opts parseStmtO
 	if name == "require" && p.lexer.Token == js_lexer.TOpenParen {
 		// "import ns = require('x')"
 		p.lexer.Next()
-		path := js_ast.Expr{Loc: p.lexer.Loc(), Data: &js_ast.EString{Value: p.lexer.StringLiteral}}
+		path := js_ast.Expr{Loc: p.lexer.Loc(), Data: &js_ast.EString{Value: p.lexer.StringLiteral()}}
 		p.lexer.Expect(js_lexer.TStringLiteral)
 		p.lexer.Expect(js_lexer.TCloseParen)
 		value.Data = &js_ast.ECall{
@@ -918,10 +955,17 @@ func (p *parser) parseTypeScriptImportEqualsStmt(loc logger.Loc, opts parseStmtO
 	}
 
 	p.lexer.ExpectOrInsertSemicolon()
+
+	if opts.isTypeScriptDeclare {
+		// "import type foo = require('bar');"
+		// "import type foo = bar.baz;"
+		return js_ast.Stmt{Loc: loc, Data: &js_ast.STypeScript{}}
+	}
+
 	ref := p.declareSymbol(js_ast.SymbolConst, defaultNameLoc, defaultName)
 	decls := []js_ast.Decl{{
-		Binding: js_ast.Binding{Loc: defaultNameLoc, Data: &js_ast.BIdentifier{Ref: ref}},
-		Value:   &value,
+		Binding:    js_ast.Binding{Loc: defaultNameLoc, Data: &js_ast.BIdentifier{Ref: ref}},
+		ValueOrNil: value,
 	}}
 
 	return js_ast.Stmt{Loc: loc, Data: &js_ast.SLocal{

@@ -57,6 +57,9 @@ func parseOptionsImpl(
 		case arg == "--splitting" && buildOpts != nil:
 			buildOpts.Splitting = true
 
+		case arg == "--allow-overwrite" && buildOpts != nil:
+			buildOpts.AllowOverwrite = true
+
 		case arg == "--watch" && buildOpts != nil:
 			buildOpts.Watch = &api.WatchMode{}
 
@@ -90,6 +93,29 @@ func parseOptionsImpl(
 				buildOpts.MinifyIdentifiers = true
 			} else {
 				transformOpts.MinifyIdentifiers = true
+			}
+
+		case strings.HasPrefix(arg, "--legal-comments="):
+			value := arg[len("--legal-comments="):]
+			var legalComments api.LegalComments
+			switch value {
+			case "none":
+				legalComments = api.LegalCommentsNone
+			case "inline":
+				legalComments = api.LegalCommentsInline
+			case "eof":
+				legalComments = api.LegalCommentsEndOfFile
+			case "linked":
+				legalComments = api.LegalCommentsLinked
+			case "external":
+				legalComments = api.LegalCommentsExternal
+			default:
+				return fmt.Errorf("Invalid legal comments value: %q (valid: none, inline, eof, linked, external)", value), nil
+			}
+			if buildOpts != nil {
+				buildOpts.LegalComments = legalComments
+			} else {
+				transformOpts.LegalComments = legalComments
 			}
 
 		case strings.HasPrefix(arg, "--charset="):
@@ -364,6 +390,23 @@ func parseOptionsImpl(
 		case strings.HasPrefix(arg, "--inject:") && buildOpts != nil:
 			buildOpts.Inject = append(buildOpts.Inject, arg[len("--inject:"):])
 
+		case strings.HasPrefix(arg, "--jsx="):
+			value := arg[len("--jsx="):]
+			var mode api.JSXMode
+			switch value {
+			case "transform":
+				mode = api.JSXModeTransform
+			case "preserve":
+				mode = api.JSXModePreserve
+			default:
+				return fmt.Errorf("Invalid jsx: %q (valid: transform, preserve)", value), nil
+			}
+			if buildOpts != nil {
+				buildOpts.JSXMode = mode
+			} else {
+				transformOpts.JSXMode = mode
+			}
+
 		case strings.HasPrefix(arg, "--jsx-factory="):
 			value := arg[len("--jsx-factory="):]
 			if buildOpts != nil {
@@ -501,6 +544,7 @@ func parseTargets(targets []string) (target api.Target, engines []api.Engine, er
 		"es2018": api.ES2018,
 		"es2019": api.ES2019,
 		"es2020": api.ES2020,
+		"es2021": api.ES2021,
 	}
 
 	validEngines := map[string]api.EngineName{
@@ -600,10 +644,10 @@ func runImpl(osArgs []string) int {
 
 	switch {
 	case buildOptions != nil:
-		// Read the "NODE_PATH" from the environment. This is part of node's
-		// module resolution algorithm. Documentation for this can be found here:
-		// https://nodejs.org/api/modules.html#modules_loading_from_the_global_folders
 		for _, key := range os.Environ() {
+			// Read the "NODE_PATH" from the environment. This is part of node's
+			// module resolution algorithm. Documentation for this can be found here:
+			// https://nodejs.org/api/modules.html#modules_loading_from_the_global_folders
 			if strings.HasPrefix(key, "NODE_PATH=") {
 				value := key[len("NODE_PATH="):]
 				separator := ":"
@@ -613,6 +657,12 @@ func runImpl(osArgs []string) int {
 				}
 				buildOptions.NodePaths = strings.Split(value, separator)
 				break
+			}
+
+			// Read "NO_COLOR" from the environment. This is a convention that some
+			// software follows. See https://no-color.org/ for more information.
+			if buildOptions.Color == api.ColorIfTerminal && strings.HasPrefix(key, "NO_COLOR=") {
+				buildOptions.Color = api.ColorNever
 			}
 		}
 
@@ -643,15 +693,18 @@ func runImpl(osArgs []string) int {
 		// Validate the metafile absolute path and directory ahead of time so we
 		// don't write any output files if it's incorrect. That makes this API
 		// option consistent with how we handle all other API options.
-		var metafileAbsPath string
-		var metafileAbsDir string
+		var writeMetafile func(string)
 		if metafile != nil {
+			var metafileAbsPath string
+			var metafileAbsDir string
+
 			if buildOptions.Outfile == "" && buildOptions.Outdir == "" {
 				// Cannot use "metafile" when writing to stdout
 				logger.PrintErrorToStderr(osArgs, "Cannot use \"metafile\" without an output path")
 				return 1
 			}
-			if realFS, err := fs.RealFS(fs.RealFSOptions{AbsWorkingDir: buildOptions.AbsWorkingDir}); err == nil {
+			realFS, realFSErr := fs.RealFS(fs.RealFSOptions{AbsWorkingDir: buildOptions.AbsWorkingDir})
+			if realFSErr == nil {
 				absPath, ok := realFS.Abs(*metafile)
 				if !ok {
 					logger.PrintErrorToStderr(osArgs, fmt.Sprintf("Invalid metafile path: %s", *metafile))
@@ -662,10 +715,43 @@ func runImpl(osArgs []string) int {
 			} else {
 				// Don't fail in this case since the error will be reported by "api.Build"
 			}
+
+			writeMetafile = func(json string) {
+				if json == "" || realFSErr != nil {
+					return // Don't write out the metafile on build errors
+				}
+				if err != nil {
+					// This should already have been checked above
+					panic(err.Error())
+				}
+				fs.BeforeFileOpen()
+				defer fs.AfterFileClose()
+				if err := fs.MkdirAll(realFS, metafileAbsDir, 0755); err != nil {
+					logger.PrintErrorToStderr(osArgs, fmt.Sprintf(
+						"Failed to create output directory: %s", err.Error()))
+				} else {
+					if err := ioutil.WriteFile(metafileAbsPath, []byte(json), 0644); err != nil {
+						logger.PrintErrorToStderr(osArgs, fmt.Sprintf(
+							"Failed to write to output file: %s", err.Error()))
+					}
+				}
+			}
+
+			// Write out the metafile whenever we rebuild
+			if buildOptions.Watch != nil {
+				buildOptions.Watch.OnRebuild = func(result api.BuildResult) {
+					writeMetafile(result.Metafile)
+				}
+			}
 		}
 
 		// Run the build
 		result := api.Build(*buildOptions)
+
+		// Write the metafile to the file system
+		if writeMetafile != nil {
+			writeMetafile(result.Metafile)
+		}
 
 		// Do not exit if we're in watch mode
 		if buildOptions.Watch != nil {
@@ -675,25 +761,6 @@ func runImpl(osArgs []string) int {
 		// Stop if there were errors
 		if len(result.Errors) > 0 {
 			return 1
-		}
-
-		// Write the metafile to the file system
-		if metafile != nil {
-			if err != nil {
-				// This should already have been checked above
-				panic(err.Error())
-			}
-			fs.BeforeFileOpen()
-			defer fs.AfterFileClose()
-			if err := os.MkdirAll(metafileAbsDir, 0755); err != nil {
-				logger.PrintErrorToStderr(osArgs, fmt.Sprintf(
-					"Failed to create output directory: %s", err.Error()))
-			} else {
-				if err := ioutil.WriteFile(metafileAbsPath, []byte(result.Metafile), 0644); err != nil {
-					logger.PrintErrorToStderr(osArgs, fmt.Sprintf(
-						"Failed to write to output file: %s", err.Error()))
-				}
-			}
 		}
 
 	case transformOptions != nil:

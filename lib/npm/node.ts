@@ -16,12 +16,7 @@ declare const WASM: boolean;
 
 let worker_threads: typeof import('worker_threads') | undefined;
 
-// This optimization is opt-in for now because it could break if node has bugs
-// with "worker_threads", and node has had such bugs in the past.
-//
-// TODO: Determine under which conditions this is safe to enable, and then
-// replace this check with a check for those conditions.
-if (process.env.ESBUILD_WORKER_THREADS) {
+if (process.env.ESBUILD_WORKER_THREADS !== '0') {
   // Don't crash if the "worker_threads" library isn't present
   try {
     worker_threads = require('worker_threads');
@@ -29,12 +24,33 @@ if (process.env.ESBUILD_WORKER_THREADS) {
   }
 }
 
+// This should only be true if this is our internal worker thread. We want this
+// library to be usable from other people's worker threads, so we should not be
+// checking for "isMainThread".
+let isInternalWorkerThread = worker_threads?.workerData?.esbuildVersion === ESBUILD_VERSION;
+
 let esbuildCommandAndArgs = (): [string, string[]] => {
   // This feature was added to give external code a way to modify the binary
   // path without modifying the code itself. Do not remove this because
   // external code relies on this.
   if (process.env.ESBUILD_BINARY_PATH) {
     return [path.resolve(process.env.ESBUILD_BINARY_PATH), []];
+  }
+
+  // Try to have a nice error message when people accidentally bundle esbuild
+  if (path.basename(__filename) !== 'main.js' || path.basename(__dirname) !== 'lib') {
+    throw new Error(
+      `The esbuild JavaScript API cannot be bundled. Please mark the "esbuild" ` +
+      `package as external so it's not included in the bundle.\n` +
+      `\n` +
+      `More information: The file containing the code for esbuild's JavaScript ` +
+      `API (${__filename}) does not appear to be inside the esbuild package on ` +
+      `the file system, which usually means that the esbuild package was bundled ` +
+      `into another file. This is problematic because the API needs to run a ` +
+      `binary executable inside the esbuild package which is located using a ` +
+      `relative path from the API code to the executable. If the esbuild package ` +
+      `is bundled, the relative path will be incorrect and the executable won't ` +
+      `be found.`);
   }
 
   if (WASM) {
@@ -138,7 +154,7 @@ export let formatMessages: typeof types.formatMessages = (messages, options) =>
 
 export let buildSync: typeof types.buildSync = (options: types.BuildOptions): any => {
   // Try using a long-lived worker thread to avoid repeated start-up overhead
-  if (worker_threads) {
+  if (worker_threads && !isInternalWorkerThread) {
     if (!workerThreadService) workerThreadService = startWorkerThreadService(worker_threads);
     return workerThreadService.buildSync(options);
   }
@@ -158,7 +174,7 @@ export let buildSync: typeof types.buildSync = (options: types.BuildOptions): an
 
 export let transformSync: typeof types.transformSync = (input, options) => {
   // Try using a long-lived worker thread to avoid repeated start-up overhead
-  if (worker_threads) {
+  if (worker_threads && !isInternalWorkerThread) {
     if (!workerThreadService) workerThreadService = startWorkerThreadService(worker_threads);
     return workerThreadService.transformSync(input, options);
   }
@@ -178,7 +194,7 @@ export let transformSync: typeof types.transformSync = (input, options) => {
 
 export let formatMessagesSync: typeof types.formatMessagesSync = (messages, options) => {
   // Try using a long-lived worker thread to avoid repeated start-up overhead
-  if (worker_threads) {
+  if (worker_threads && !isInternalWorkerThread) {
     if (!workerThreadService) workerThreadService = startWorkerThreadService(worker_threads);
     return workerThreadService.formatMessagesSync(messages, options);
   }
@@ -356,7 +372,7 @@ let workerThreadService: WorkerThreadService | null = null;
 let startWorkerThreadService = (worker_threads: typeof import('worker_threads')): WorkerThreadService => {
   let { port1: mainPort, port2: workerPort } = new worker_threads.MessageChannel();
   let worker = new worker_threads.Worker(__filename, {
-    workerData: { workerPort, defaultWD },
+    workerData: { workerPort, defaultWD, esbuildVersion: ESBUILD_VERSION },
     transferList: [workerPort],
 
     // From node's documentation: https://nodejs.org/api/worker_threads.html
@@ -376,7 +392,7 @@ let startWorkerThreadService = (worker_threads: typeof import('worker_threads'))
   // This forbids options which would cause structured clone errors
   let fakeBuildError = (text: string) => {
     let error: any = new Error(`Build failed with 1 error:\nerror: ${text}`);
-    let errors: types.Message[] = [{ text, location: null, notes: [], detail: void 0 }];
+    let errors: types.Message[] = [{ pluginName: '', text, location: null, notes: [], detail: void 0 }];
     error.errors = errors;
     error.warnings = [];
     return error;
@@ -509,6 +525,6 @@ let startSyncServiceWorker = () => {
 };
 
 // If we're in the worker thread, start the worker code
-if (worker_threads && !worker_threads.isMainThread) {
+if (isInternalWorkerThread) {
   startSyncServiceWorker();
 }

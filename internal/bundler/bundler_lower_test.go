@@ -863,7 +863,11 @@ func TestLowerAsyncThis2016ES6(t *testing.T) {
 	lower_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
+				export {bar} from "./other"
 				export let foo = async () => this
+			`,
+			"/other.js": `
+				export let bar = async () => {}
 			`,
 		},
 		entryPaths: []string{"/entry.js"},
@@ -872,6 +876,9 @@ func TestLowerAsyncThis2016ES6(t *testing.T) {
 			UnsupportedJSFeatures: es(2016),
 			AbsOutputFile:         "/out.js",
 		},
+		expectedScanLog: `entry.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+entry.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+`,
 	})
 }
 
@@ -1494,7 +1501,13 @@ func TestLowerPrivateClassBrandCheckUnsupported(t *testing.T) {
 				class Foo {
 					#foo
 					#bar
-					baz() { #foo in this }
+					baz() {
+						return [
+							this.#foo,
+							this.#bar,
+							#foo in this,
+						]
+					}
 				}
 			`,
 		},
@@ -1514,7 +1527,13 @@ func TestLowerPrivateClassBrandCheckSupported(t *testing.T) {
 				class Foo {
 					#foo
 					#bar
-					baz() { #foo in this }
+					baz() {
+						return [
+							this.#foo,
+							this.#bar,
+							#foo in this,
+						]
+					}
 				}
 			`,
 		},
@@ -1522,6 +1541,33 @@ func TestLowerPrivateClassBrandCheckSupported(t *testing.T) {
 		options: config.Options{
 			Mode:          config.ModePassThrough,
 			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestLowerTemplateObject(t *testing.T) {
+	lower_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				x = () => [
+					tag` + "`x`" + `,
+					tag` + "`\\xFF`" + `,
+					tag` + "`\\x`" + `,
+					tag` + "`\\u`" + `,
+				]
+				y = () => [
+					tag` + "`x${y}z`" + `,
+					tag` + "`\\xFF${y}z`" + `,
+					tag` + "`x${y}\\z`" + `,
+					tag` + "`x${y}\\u`" + `,
+				]
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.TemplateLiteral,
 		},
 	})
 }

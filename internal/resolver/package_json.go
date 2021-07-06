@@ -28,8 +28,8 @@ type packageJSON struct {
 	// to something like https://www.npmjs.com/package/util so it works in the
 	// browser.
 	//
-	// This field contains a mapping of absolute paths to absolute paths. Mapping
-	// to an empty path indicates that the module is disabled. As far as I can
+	// This field contains the original mapping object in "package.json". Mapping
+	// to a nil path indicates that the module is disabled. As far as I can
 	// tell, the official spec is an abandoned GitHub repo hosted by a user account:
 	// https://github.com/defunctzombie/package-browser-field-spec. The npm docs
 	// say almost nothing: https://docs.npmjs.com/files/package.json.
@@ -65,37 +65,129 @@ type packageJSON struct {
 	exportsMap *peMap
 }
 
-func (r resolverQuery) checkBrowserMap(pj *packageJSON, inputPath string) (remapped *string, ok bool) {
-	// Normalize the path so we can compare against it without getting confused by "./"
-	cleanPath := path.Clean(strings.ReplaceAll(inputPath, "\\", "/"))
+type browserPathKind uint8
 
-	if cleanPath == "." {
+const (
+	absolutePathKind browserPathKind = iota
+	packagePathKind
+)
+
+func (r resolverQuery) checkBrowserMap(resolveDirInfo *dirInfo, inputPath string, kind browserPathKind) (remapped *string, ok bool) {
+	// This only applies if the current platform is "browser"
+	if r.options.Platform != config.PlatformBrowser {
+		return nil, false
+	}
+
+	// There must be an enclosing directory with a "package.json" file with a "browser" map
+	if resolveDirInfo.enclosingBrowserScope == nil {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("No \"browser\" map found in directory %q", resolveDirInfo.absPath))
+		}
+		return nil, false
+	}
+
+	packageJSON := resolveDirInfo.enclosingBrowserScope.packageJSON
+	browserMap := packageJSON.browserMap
+
+	checkPath := func(pathToCheck string) bool {
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("Checking for %q in the \"browser\" map in %q",
+				pathToCheck, packageJSON.source.KeyPath.Text))
+		}
+
+		// Check for equality
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("  Checking for %q", pathToCheck))
+		}
+		remapped, ok = browserMap[pathToCheck]
+		if ok {
+			inputPath = pathToCheck
+			return true
+		}
+
+		// If that failed, try adding implicit extensions
+		for _, ext := range r.options.ExtensionOrder {
+			extPath := pathToCheck + ext
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("  Checking for %q", extPath))
+			}
+			remapped, ok = browserMap[extPath]
+			if ok {
+				inputPath = extPath
+				return true
+			}
+		}
+
+		// If that failed, try assuming this is a directory and looking for an "index" file
+		indexPath := path.Join(pathToCheck, "index")
+		if IsPackagePath(indexPath) && !IsPackagePath(pathToCheck) {
+			indexPath = "./" + indexPath
+		}
+
+		// Check for equality
+		if r.debugLogs != nil {
+			r.debugLogs.addNote(fmt.Sprintf("  Checking for %q", indexPath))
+		}
+		remapped, ok = browserMap[indexPath]
+		if ok {
+			inputPath = indexPath
+			return true
+		}
+
+		// If that failed, try adding implicit extensions
+		for _, ext := range r.options.ExtensionOrder {
+			extPath := indexPath + ext
+			if r.debugLogs != nil {
+				r.debugLogs.addNote(fmt.Sprintf("  Checking for %q", extPath))
+			}
+			remapped, ok = browserMap[extPath]
+			if ok {
+				inputPath = extPath
+				return true
+			}
+		}
+
+		return false
+	}
+
+	// Turn absolute paths into paths relative to the "browser" map location
+	if kind == absolutePathKind {
+		relPath, ok := r.fs.Rel(resolveDirInfo.enclosingBrowserScope.absPath, inputPath)
+		if !ok {
+			return nil, false
+		}
+		inputPath = strings.ReplaceAll(relPath, "\\", "/")
+	}
+
+	if inputPath == "." {
 		// No bundler supports remapping ".", so we don't either
 		return nil, false
 	}
 
-	if r.debugLogs != nil {
-		r.debugLogs.addNote(fmt.Sprintf("Checking for %q in the \"browser\" map in %q",
-			inputPath, pj.source.KeyPath.Text))
-	}
+	// First try the import path as a package path
+	if !checkPath(inputPath) && IsPackagePath(inputPath) {
+		// If a package path didn't work, try the import path as a relative path
+		switch kind {
+		case absolutePathKind:
+			checkPath("./" + inputPath)
 
-	// Check for equality
-	if r.debugLogs != nil {
-		r.debugLogs.addNote(fmt.Sprintf("Checking for %q", cleanPath))
-	}
-	remapped, ok = pj.browserMap[cleanPath]
-
-	// If that failed, try adding implicit extensions
-	if !ok {
-		for _, ext := range r.options.ExtensionOrder {
-			extPath := cleanPath + ext
-			if r.debugLogs != nil {
-				r.debugLogs.addNote(fmt.Sprintf("Checking for %q", extPath))
+		case packagePathKind:
+			// Browserify allows a browser map entry of "./pkg" to override a package
+			// path of "require('pkg')". This is weird, and arguably a bug. But we
+			// replicate this bug for compatibility. However, Browserify only allows
+			// this within the same package. It does not allow such an entry in a
+			// parent package to override this in a child package. So this behavior
+			// is disallowed if there is a "node_modules" folder in between the child
+			// package and the parent package.
+			isInSamePackage := true
+			for info := resolveDirInfo; info != nil && info != resolveDirInfo.enclosingBrowserScope; info = info.parent {
+				if info.isNodeModules {
+					isInSamePackage = false
+					break
+				}
 			}
-			remapped, ok = pj.browserMap[extPath]
-			if ok {
-				cleanPath = extPath
-				break
+			if isInSamePackage {
+				checkPath("./" + inputPath)
 			}
 		}
 	}
@@ -105,7 +197,7 @@ func (r resolverQuery) checkBrowserMap(pj *packageJSON, inputPath string) (remap
 			if remapped == nil {
 				r.debugLogs.addNote(fmt.Sprintf("Found %q marked as disabled", inputPath))
 			} else {
-				r.debugLogs.addNote(fmt.Sprintf("Found %q mapping to %q", cleanPath, *remapped))
+				r.debugLogs.addNote(fmt.Sprintf("Found %q mapping to %q", inputPath, *remapped))
 			}
 		} else {
 			r.debugLogs.addNote(fmt.Sprintf("Failed to find %q", inputPath))
@@ -136,6 +228,7 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 		PrettyPath: r.PrettyPath(keyPath),
 		Contents:   contents,
 	}
+	tracker := logger.MakeLineColumnTracker(&jsonSource)
 
 	json, ok := r.caches.JSONCache.Parse(r.log, jsonSource, js_parser.JSONOptions{})
 	if !ok {
@@ -153,11 +246,11 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 			case "module":
 				packageJSON.moduleType = config.ModuleESM
 			default:
-				r.log.AddRangeWarning(&jsonSource, jsonSource.RangeOfString(typeJSON.Loc),
+				r.log.AddRangeWarning(&tracker, jsonSource.RangeOfString(typeJSON.Loc),
 					fmt.Sprintf("%q is not a valid value for the \"type\" field (must be either \"commonjs\" or \"module\")", typeValue))
 			}
 		} else {
-			r.log.AddWarning(&jsonSource, typeJSON.Loc,
+			r.log.AddWarning(&tracker, typeJSON.Loc,
 				"The value for \"type\" must be a string")
 		}
 	}
@@ -197,28 +290,17 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 
 			// Remap all files in the browser field
 			for _, prop := range browser.Properties {
-				if key, ok := getString(prop.Key); ok && prop.Value != nil {
-					// Normalize the path so we can compare against it without getting
-					// confused by "./". There is no distinction between package paths and
-					// relative paths for these values because some tools (i.e. Browserify)
-					// don't make such a distinction.
-					//
-					// This leads to weird things like a mapping for "./foo" matching an
-					// import of "foo", but that's actually not a bug. Or arguably it's a
-					// bug in Browserify but we have to replicate this bug because packages
-					// do this in the wild.
-					key = path.Clean(key)
-
-					if value, ok := getString(*prop.Value); ok {
+				if key, ok := getString(prop.Key); ok && prop.ValueOrNil.Data != nil {
+					if value, ok := getString(prop.ValueOrNil); ok {
 						// If this is a string, it's a replacement package
 						browserMap[key] = &value
-					} else if value, ok := getBool(*prop.Value); ok {
+					} else if value, ok := getBool(prop.ValueOrNil); ok {
 						// If this is false, it means the package is disabled
 						if !value {
 							browserMap[key] = nil
 						}
 					} else {
-						r.log.AddWarning(&jsonSource, prop.Value.Loc,
+						r.log.AddWarning(&tracker, prop.ValueOrNil.Loc,
 							"Each \"browser\" mapping must be a string or a boolean")
 					}
 				}
@@ -255,13 +337,18 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 			for _, itemJSON := range data.Items {
 				item, ok := itemJSON.Data.(*js_ast.EString)
 				if !ok || item.Value == nil {
-					r.log.AddWarning(&jsonSource, itemJSON.Loc,
+					r.log.AddWarning(&tracker, itemJSON.Loc,
 						"Expected string in array for \"sideEffects\"")
 					continue
 				}
 
-				absPattern := r.fs.Join(inputPath, js_lexer.UTF16ToString(item.Value))
-				re, hadWildcard := globToEscapedRegexp(absPattern)
+				// Reference: https://github.com/webpack/webpack/blob/ed175cd22f89eb9fecd0a70572a3fd0be028e77c/lib/optimize/SideEffectsFlagPlugin.js
+				pattern := js_lexer.UTF16ToString(item.Value)
+				if !strings.ContainsRune(pattern, '/') {
+					pattern = "**/" + pattern
+				}
+				absPattern := r.fs.Join(inputPath, pattern)
+				re, hadWildcard := globstarToEscapedRegexp(absPattern)
 
 				// Wildcard patterns require more expensive matching
 				if hadWildcard {
@@ -274,7 +361,7 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 			}
 
 		default:
-			r.log.AddWarning(&jsonSource, sideEffectsJSON.Loc,
+			r.log.AddWarning(&tracker, sideEffectsJSON.Loc,
 				"The value for \"sideEffects\" must be a boolean or an array")
 		}
 	}
@@ -290,27 +377,59 @@ func (r resolverQuery) parsePackageJSON(inputPath string) *packageJSON {
 	return packageJSON
 }
 
-func globToEscapedRegexp(glob string) (string, bool) {
+// Reference: https://github.com/fitzgen/glob-to-regexp/blob/2abf65a834259c6504ed3b80e85f893f8cd99127/index.js
+func globstarToEscapedRegexp(glob string) (string, bool) {
 	sb := strings.Builder{}
 	sb.WriteByte('^')
 	hadWildcard := false
+	n := len(glob)
 
-	for _, c := range glob {
+	for i := 0; i < n; i++ {
+		c := glob[i]
 		switch c {
 		case '\\', '^', '$', '.', '+', '|', '(', ')', '[', ']', '{', '}':
 			sb.WriteByte('\\')
-			sb.WriteRune(c)
-
-		case '*':
-			sb.WriteString(".*")
-			hadWildcard = true
+			sb.WriteByte(c)
 
 		case '?':
 			sb.WriteByte('.')
 			hadWildcard = true
 
+		case '*':
+			// Move over all consecutive "*"'s.
+			// Also store the previous and next characters
+			prevChar := -1
+			if i > 0 {
+				prevChar = int(glob[i-1])
+			}
+			starCount := 1
+			for i+1 < n && glob[i+1] == '*' {
+				starCount++
+				i++
+			}
+			nextChar := -1
+			if i+1 < n {
+				nextChar = int(glob[i+1])
+			}
+
+			// Determine if this is a globstar segment
+			isGlobstar := starCount > 1 && // multiple "*"'s
+				(prevChar == '/' || prevChar == -1) && // from the start of the segment
+				(nextChar == '/' || nextChar == -1) // to the end of the segment
+
+			if isGlobstar {
+				// It's a globstar, so match zero or more path segments
+				sb.WriteString("(?:[^/]*(?:/|$))*")
+				i++ // Move over the "/"
+			} else {
+				// It's not a globstar, so only match one path segment
+				sb.WriteString("[^/]*")
+			}
+
+			hadWildcard = true
+
 		default:
-			sb.WriteRune(c)
+			sb.WriteByte(c)
 		}
 	}
 
@@ -370,6 +489,7 @@ func (entry peEntry) valueForKey(key string) (peEntry, bool) {
 
 func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *peMap {
 	var visit func(expr js_ast.Expr) peEntry
+	tracker := logger.MakeLineColumnTracker(&source)
 
 	visit = func(expr js_ast.Expr) peEntry {
 		var firstToken logger.Range
@@ -417,9 +537,9 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 					isConditionalSugar = curIsConditionalSugar
 				} else if isConditionalSugar != curIsConditionalSugar {
 					prevEntry := mapData[i-1]
-					log.AddRangeWarningWithNotes(&source, keyRange,
+					log.AddRangeWarningWithNotes(&tracker, keyRange,
 						"This object cannot contain keys that both start with \".\" and don't start with \".\"",
-						[]logger.MsgData{logger.RangeData(&source, prevEntry.keyRange,
+						[]logger.MsgData{logger.RangeData(&tracker, prevEntry.keyRange,
 							fmt.Sprintf("The previous key %q is incompatible with the current key %q", prevEntry.key, key))})
 					return peEntry{
 						kind:       peInvalid,
@@ -430,7 +550,7 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 				entry := peMapEntry{
 					key:      key,
 					keyRange: keyRange,
-					value:    visit(*property.Value),
+					value:    visit(property.ValueOrNil),
 				}
 
 				if strings.HasSuffix(key, "/") || strings.HasSuffix(key, "*") {
@@ -461,7 +581,7 @@ func parseExportsMap(source logger.Source, log logger.Log, json js_ast.Expr) *pe
 			firstToken.Loc = expr.Loc
 		}
 
-		log.AddRangeWarning(&source, firstToken, "This value must be a string, an object, an array, or null")
+		log.AddRangeWarning(&tracker, firstToken, "This value must be a string, an object, an array, or null")
 		return peEntry{
 			kind:       peInvalid,
 			firstToken: firstToken,

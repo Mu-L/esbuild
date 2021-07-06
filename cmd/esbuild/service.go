@@ -47,6 +47,8 @@ type outgoingPacket struct {
 }
 
 func runService(sendPings bool) {
+	logger.API = logger.JSAPI
+
 	service := serviceType{
 		callbacks:       make(map[uint32]responseCallback),
 		rebuilds:        make(map[int]rebuildCallback),
@@ -350,7 +352,6 @@ func (service *serviceType) handleBuildRequest(id uint32, request map[string]int
 	key := request["key"].(int)
 	write := request["write"].(bool)
 	incremental := request["incremental"].(bool)
-	hasOnRebuild := request["hasOnRebuild"].(bool)
 	serveObj, isServe := request["serve"].(interface{})
 	entries := request["entries"].([]interface{})
 	flags := decodeStringArray(request["flags"].([]interface{}))
@@ -436,7 +437,7 @@ func (service *serviceType) handleBuildRequest(id uint32, request map[string]int
 		return response
 	}
 
-	if options.Watch != nil && hasOnRebuild {
+	if options.Watch != nil {
 		options.Watch.OnRebuild = func(result api.BuildResult) {
 			service.sendRequest(map[string]interface{}{
 				"command": "watch-rebuild",
@@ -621,6 +622,24 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 	goPlugins = append(goPlugins, api.Plugin{
 		Name: "JavaScript plugins",
 		Setup: func(build api.PluginBuild) {
+			build.OnStart(func() (api.OnStartResult, error) {
+				result := api.OnStartResult{}
+
+				response := service.sendRequest(map[string]interface{}{
+					"command": "start",
+					"key":     key,
+				}).(map[string]interface{})
+
+				if value, ok := response["errors"]; ok {
+					result.Errors = decodeMessages(value.([]interface{}))
+				}
+				if value, ok := response["warnings"]; ok {
+					result.Warnings = decodeMessages(value.([]interface{}))
+				}
+
+				return result, nil
+			})
+
 			build.OnResolve(api.OnResolveOptions{Filter: ".*"}, func(args api.OnResolveArgs) (api.OnResolveResult, error) {
 				var ids []interface{}
 				applyPath := logger.Path{Text: args.Path, Namespace: args.Namespace}
@@ -696,6 +715,13 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 				if value, ok := response["external"]; ok {
 					result.External = value.(bool)
 				}
+				if value, ok := response["sideEffects"]; ok {
+					if value.(bool) {
+						result.SideEffects = api.SideEffectsTrue
+					} else {
+						result.SideEffects = api.SideEffectsFalse
+					}
+				}
 				if value, ok := response["pluginData"]; ok {
 					result.PluginData = value.(int)
 				}
@@ -753,6 +779,13 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 				if value, ok := response["pluginName"]; ok {
 					result.PluginName = value.(string)
 				}
+				if value, ok := response["loader"]; ok {
+					loader, err := cli_helpers.ParseLoader(value.(string))
+					if err != nil {
+						return result, err
+					}
+					result.Loader = loader
+				}
 				if value, ok := response["contents"]; ok {
 					contents := string(value.([]byte))
 					result.Contents = &contents
@@ -774,13 +807,6 @@ func (service *serviceType) convertPlugins(key int, jsPlugins interface{}) ([]ap
 				}
 				if value, ok := response["watchDirs"]; ok {
 					result.WatchDirs = decodeStringArray(value.([]interface{}))
-				}
-				if value, ok := response["loader"]; ok {
-					loader, err := cli_helpers.ParseLoader(value.(string))
-					if err != nil {
-						return api.OnLoadResult{}, err
-					}
-					result.Loader = loader
 				}
 
 				return result, nil
@@ -926,8 +952,9 @@ func encodeMessages(msgs []api.Message) []interface{} {
 	values := make([]interface{}, len(msgs))
 	for i, msg := range msgs {
 		value := map[string]interface{}{
-			"text":     msg.Text,
-			"location": encodeLocation(msg.Location),
+			"pluginName": msg.PluginName,
+			"text":       msg.Text,
+			"location":   encodeLocation(msg.Location),
 		}
 		values[i] = value
 
@@ -975,9 +1002,10 @@ func decodeMessages(values []interface{}) []api.Message {
 	for i, value := range values {
 		obj := value.(map[string]interface{})
 		msg := api.Message{
-			Text:     obj["text"].(string),
-			Location: decodeLocation(obj["location"]),
-			Detail:   obj["detail"].(int),
+			PluginName: obj["pluginName"].(string),
+			Text:       obj["text"].(string),
+			Location:   decodeLocation(obj["location"]),
+			Detail:     obj["detail"].(int),
 		}
 		for _, note := range obj["notes"].([]interface{}) {
 			noteObj := note.(map[string]interface{})
@@ -1012,11 +1040,14 @@ func decodeLocationToPrivate(value interface{}) *logger.MsgLocation {
 }
 
 func decodeMessageToPrivate(obj map[string]interface{}) logger.Msg {
-	msg := logger.Msg{Data: logger.MsgData{
-		Text:       obj["text"].(string),
-		Location:   decodeLocationToPrivate(obj["location"]),
-		UserDetail: obj["detail"].(int),
-	}}
+	msg := logger.Msg{
+		PluginName: obj["pluginName"].(string),
+		Data: logger.MsgData{
+			Text:       obj["text"].(string),
+			Location:   decodeLocationToPrivate(obj["location"]),
+			UserDetail: obj["detail"].(int),
+		},
+	}
 	for _, note := range obj["notes"].([]interface{}) {
 		noteObj := note.(map[string]interface{})
 		msg.Notes = append(msg.Notes, logger.MsgData{

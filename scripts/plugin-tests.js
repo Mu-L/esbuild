@@ -131,7 +131,8 @@ let pluginTests = {
       assert.strictEqual(e.message.split('\n')[0], 'Build failed with 1 error:')
       assert.notStrictEqual(e.errors, void 0)
       assert.strictEqual(e.errors.length, 1)
-      assert.strictEqual(e.errors[0].text, '[x] Plugin is missing a setup function')
+      assert.strictEqual(e.errors[0].pluginName, 'x')
+      assert.strictEqual(e.errors[0].text, 'Plugin is missing a setup function')
       assert.deepStrictEqual(e.warnings, [])
     }
   },
@@ -193,7 +194,7 @@ let pluginTests = {
         }],
       })
     } catch (e) {
-      assert(e.message.endsWith('error: [x] Expected onResolve() callback in plugin "x" to return an object'), e.message)
+      assert(e.message.endsWith('error: [plugin: x] Expected onResolve() callback in plugin "x" to return an object'), e.message)
     }
 
     try {
@@ -211,7 +212,7 @@ let pluginTests = {
         }],
       })
     } catch (e) {
-      assert(e.message.endsWith('error: [x] Invalid option from onResolve() callback in plugin "x": "thisIsWrong"'), e.message)
+      assert(e.message.endsWith('error: [plugin: x] Invalid option from onResolve() callback in plugin "x": "thisIsWrong"'), e.message)
     }
   },
 
@@ -254,7 +255,7 @@ let pluginTests = {
         }],
       })
     } catch (e) {
-      assert(e.message.endsWith(`error: [x] Expected onLoad() callback in plugin "x" to return an object`), e.message)
+      assert(e.message.endsWith(`error: [plugin: x] Expected onLoad() callback in plugin "x" to return an object`), e.message)
     }
 
     try {
@@ -275,7 +276,7 @@ let pluginTests = {
         }],
       })
     } catch (e) {
-      assert(e.message.endsWith('error: [x] Invalid option from onLoad() callback in plugin "x": "thisIsWrong"'), e.message)
+      assert(e.message.endsWith('error: [plugin: x] Invalid option from onLoad() callback in plugin "x": "thisIsWrong"'), e.message)
     }
   },
 
@@ -706,6 +707,80 @@ let pluginTests = {
     })
     const result = require(output)
     assert.strictEqual(result.default, 123)
+  },
+
+  async resolveWithSideEffectsFalse({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+
+    await writeFileAsync(input, `
+      import './re-export-unused'
+      import {a, b, c} from './re-export-used'
+      import './import-unused'
+      use([a, b, c])
+    `)
+    await writeFileAsync(path.join(testDir, 're-export-unused.js'), `
+      export {default as a} from 'plugin:unused-false'
+      export {default as b} from 'plugin:unused-true'
+      export {default as c} from 'plugin:unused-none'
+    `)
+    await writeFileAsync(path.join(testDir, 're-export-used.js'), `
+      export {default as a} from 'plugin:used-false'
+      export {default as b} from 'plugin:used-true'
+      export {default as c} from 'plugin:used-none'
+    `)
+    await writeFileAsync(path.join(testDir, 'import-unused.js'), `
+      import 'plugin:ignored-false'
+      import 'plugin:ignored-true'
+      import 'plugin:ignored-none'
+    `)
+
+    const result = await esbuild.build({
+      entryPoints: [input],
+      bundle: true,
+      write: false,
+      format: 'cjs',
+      logLevel: 'error',
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onResolve({ filter: /^plugin:/ }, args => {
+            return {
+              path: args.path,
+              namespace: 'ns',
+              sideEffects:
+                args.path.endsWith('-true') ? true :
+                  args.path.endsWith('-false') ? false :
+                    undefined,
+            };
+          });
+          build.onLoad({ filter: /^plugin:/ }, args => {
+            return { contents: `export default use(${JSON.stringify(args.path)})` };
+          });
+        },
+      }],
+    })
+
+    // Validate that the unused "sideEffects: false" files were omitted
+    const used = [];
+    new Function('use', result.outputFiles[0].text)(x => used.push(x));
+    assert.deepStrictEqual(used, [
+      'plugin:unused-true',
+      'plugin:unused-none',
+
+      'plugin:used-false',
+      'plugin:used-true',
+      'plugin:used-none',
+
+      'plugin:ignored-true',
+      'plugin:ignored-none',
+
+      [3, 4, 5],
+    ])
+
+    // Check that the warning for "sideEffect: false" imports mentions the plugin
+    assert.strictEqual(result.warnings.length, 1)
+    assert.strictEqual(result.warnings[0].text,
+      'Ignoring this import because "ns:plugin:ignored-false" was marked as having no side effects by plugin "name"')
   },
 
   async noResolveDirInFileModule({ esbuild, testDir }) {
@@ -1152,6 +1227,7 @@ let pluginTests = {
     } catch (e) {
       assert.deepStrictEqual(e.warnings, [])
       assert.deepStrictEqual(e.errors, [{
+        pluginName: '',
         text: 'Expected ";" but found "y"',
         location: {
           file: '<stdin>',
@@ -1171,6 +1247,7 @@ let pluginTests = {
   async transformUndefinedDetailForWarning({ esbuild }) {
     const result = await esbuild.transform('typeof x == "null"')
     assert.deepStrictEqual(result.warnings, [{
+      pluginName: '',
       text: 'The "typeof" operator will never evaluate to "null"',
       location: {
         file: '<stdin>',
@@ -1197,6 +1274,7 @@ let pluginTests = {
     } catch (e) {
       assert.deepStrictEqual(e.warnings, [])
       assert.deepStrictEqual(e.errors, [{
+        pluginName: '',
         text: 'Expected ";" but found "y"',
         location: {
           file: '<stdin>',
@@ -1220,6 +1298,7 @@ let pluginTests = {
       logLevel: 'silent',
     })
     assert.deepStrictEqual(result.warnings, [{
+      pluginName: '',
       text: 'The "typeof" operator will never evaluate to "null"',
       location: {
         file: '<stdin>',
@@ -1243,7 +1322,7 @@ let pluginTests = {
         write: false,
         logLevel: 'silent',
         plugins: [{
-          name: 'plugin',
+          name: 'the-plugin',
           setup(build) {
             build.onResolve({ filter: /.*/ }, () => {
               throw theError;
@@ -1255,7 +1334,8 @@ let pluginTests = {
     } catch (e) {
       assert.strictEqual(e.warnings.length, 0)
       assert.strictEqual(e.errors.length, 1)
-      assert.strictEqual(e.errors[0].text, '[plugin] theError')
+      assert.strictEqual(e.errors[0].pluginName, 'the-plugin')
+      assert.strictEqual(e.errors[0].text, 'theError')
       assert.strictEqual(e.errors[0].detail, theError)
     }
   },
@@ -1268,7 +1348,7 @@ let pluginTests = {
         write: false,
         logLevel: 'silent',
         plugins: [{
-          name: 'plugin',
+          name: 'the-plugin',
           setup(build) {
             build.onResolve({ filter: /.*/ }, () => ({ path: 'abc', namespace: 'xyz' }))
             build.onLoad({ filter: /.*/ }, () => {
@@ -1281,7 +1361,8 @@ let pluginTests = {
     } catch (e) {
       assert.strictEqual(e.warnings.length, 0)
       assert.strictEqual(e.errors.length, 1)
-      assert.strictEqual(e.errors[0].text, '[plugin] theError')
+      assert.strictEqual(e.errors[0].pluginName, 'the-plugin')
+      assert.strictEqual(e.errors[0].text, 'theError')
       assert.strictEqual(e.errors[0].detail, theError)
     }
   },
@@ -1294,7 +1375,7 @@ let pluginTests = {
         write: false,
         logLevel: 'silent',
         plugins: [{
-          name: 'plugin',
+          name: 'the-plugin',
           setup(build) {
             build.onResolve({ filter: /.*/ }, () => {
               return {
@@ -1333,7 +1414,8 @@ let pluginTests = {
       assert.strictEqual(e.warnings.length, 0)
       assert.strictEqual(e.errors.length, 1)
       assert.deepStrictEqual(e.errors[0], {
-        text: '[plugin] some error',
+        pluginName: 'the-plugin',
+        text: 'some error',
         location: {
           file: 'ns1:file1',
           namespace: 'ns1',
@@ -1367,11 +1449,12 @@ let pluginTests = {
       write: false,
       logLevel: 'silent',
       plugins: [{
-        name: 'plugin',
+        name: 'the-plugin',
         setup(build) {
           build.onResolve({ filter: /.*/ }, () => {
             return {
               path: 'abc', namespace: 'xyz', warnings: [{
+                pluginName: 'other-plugin',
                 text: 'some warning',
                 location: {
                   file: 'file1',
@@ -1403,9 +1486,9 @@ let pluginTests = {
       }],
     })
     assert.strictEqual(result.warnings.length, 1)
-    assert.strictEqual(result.warnings[0].text, '[plugin] some warning')
     assert.deepStrictEqual(result.warnings[0], {
-      text: '[plugin] some warning',
+      pluginName: 'other-plugin',
+      text: 'some warning',
       location: {
         file: 'ns1:file1',
         namespace: 'ns1',
@@ -1439,7 +1522,7 @@ let pluginTests = {
         write: false,
         logLevel: 'silent',
         plugins: [{
-          name: 'plugin',
+          name: 'the-plugin',
           setup(build) {
             build.onResolve({ filter: /.*/ }, () => ({ path: 'abc', namespace: 'xyz' }))
             build.onLoad({ filter: /.*/ }, () => {
@@ -1479,7 +1562,8 @@ let pluginTests = {
       assert.strictEqual(e.warnings.length, 0)
       assert.strictEqual(e.errors.length, 1)
       assert.deepStrictEqual(e.errors[0], {
-        text: '[plugin] some error',
+        pluginName: 'the-plugin',
+        text: 'some error',
         location: {
           file: 'ns1:file1',
           namespace: 'ns1',
@@ -1513,7 +1597,7 @@ let pluginTests = {
       write: false,
       logLevel: 'silent',
       plugins: [{
-        name: 'plugin',
+        name: 'the-plugin',
         setup(build) {
           build.onResolve({ filter: /.*/ }, () => ({ path: 'abc', namespace: 'xyz' }))
           build.onLoad({ filter: /.*/ }, () => {
@@ -1550,7 +1634,8 @@ let pluginTests = {
     })
     assert.strictEqual(result.warnings.length, 1)
     assert.deepStrictEqual(result.warnings[0], {
-      text: '[plugin] some warning',
+      pluginName: 'the-plugin',
+      text: 'some warning',
       location: {
         file: 'ns1:file1',
         namespace: 'ns1',
@@ -1761,6 +1846,7 @@ let pluginTests = {
         bundle: true,
         write: false,
         logLevel: 'silent',
+        platform: 'node',
         plugins: [{
           name: 'plugin',
           setup(build) {
@@ -1917,6 +2003,39 @@ let pluginTests = {
         },
       }],
     })
+  },
+
+  async fileLoaderCustomNamespaceIssue1404({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.data')
+    const outdir = path.join(testDir, 'out')
+    await writeFileAsync(input, `some data`)
+    await esbuild.build({
+      entryPoints: [path.basename(input)],
+      absWorkingDir: testDir,
+      logLevel: 'silent',
+      outdir,
+      assetNames: '[name]',
+      plugins: [{
+        name: 'plugin',
+        setup(build) {
+          build.onResolve({ filter: /\.data$/ }, args => {
+            return {
+              path: args.path,
+              namespace: 'ns',
+            }
+          })
+          build.onLoad({ filter: /.*/, namespace: 'ns' }, async (args) => {
+            const data = await readFileAsync(path.join(testDir, args.path), 'utf8')
+            return {
+              contents: data.split('').reverse().join(''),
+              loader: 'file',
+            }
+          })
+        },
+      }],
+    })
+    assert.strictEqual(await readFileAsync(input, 'utf8'), `some data`)
+    assert.strictEqual(require(path.join(outdir, 'in.js')), `./in.data`)
   },
 }
 
@@ -2139,6 +2258,250 @@ let syncTests = {
       result.stop()
     }
   },
+
+  async onStartCallback({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    await writeFileAsync(input, ``)
+
+    let onStartTimes = 0
+    let errorToThrow = null
+    let valueToReturn = null
+
+    const result = await esbuild.build({
+      entryPoints: [input],
+      write: false,
+      logLevel: 'silent',
+      incremental: true,
+      plugins: [
+        {
+          name: 'some-plugin',
+          setup(build) {
+            build.onStart(() => {
+              if (errorToThrow) throw errorToThrow
+              if (valueToReturn) return valueToReturn
+              onStartTimes++
+            })
+          },
+        },
+      ],
+    })
+    assert.strictEqual(onStartTimes, 1)
+
+    await result.rebuild()
+    assert.strictEqual(onStartTimes, 2)
+
+    await result.rebuild()
+    assert.strictEqual(onStartTimes, 3)
+
+    errorToThrow = new Error('throw test')
+    try {
+      await result.rebuild()
+      throw new Error('Expected an error to be thrown')
+    } catch (e) {
+      assert.notStrictEqual(e.errors, void 0)
+      assert.strictEqual(e.errors.length, 1)
+      assert.strictEqual(e.errors[0].pluginName, 'some-plugin')
+      assert.strictEqual(e.errors[0].text, 'throw test')
+    } finally {
+      errorToThrow = null
+    }
+
+    valueToReturn = { errors: [{ text: 'return test', location: { file: 'foo.js', line: 2 } }] }
+    try {
+      await result.rebuild()
+      throw new Error('Expected an error to be thrown')
+    } catch (e) {
+      assert.notStrictEqual(e.errors, void 0)
+      assert.strictEqual(e.errors.length, 1)
+      assert.strictEqual(e.errors[0].pluginName, 'some-plugin')
+      assert.strictEqual(e.errors[0].text, 'return test')
+      assert.notStrictEqual(e.errors[0].location, null)
+      assert.strictEqual(e.errors[0].location.file, 'foo.js')
+      assert.strictEqual(e.errors[0].location.line, 2)
+    } finally {
+      valueToReturn = null
+    }
+
+    assert.strictEqual(onStartTimes, 3)
+    valueToReturn = new Promise(resolve => setTimeout(() => {
+      onStartTimes++
+      resolve()
+    }, 500))
+    await result.rebuild()
+    assert.strictEqual(onStartTimes, 4)
+    valueToReturn = null
+
+    result.rebuild.dispose()
+  },
+
+  async onEndCallback({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    await writeFileAsync(input, ``)
+
+    let onEndTimes = 0
+    let errorToThrow = null
+    let valueToReturn = null
+    let mutateFn = null
+
+    const result = await esbuild.build({
+      entryPoints: [input],
+      write: false,
+      logLevel: 'silent',
+      incremental: true,
+      plugins: [
+        {
+          name: 'some-plugin',
+          setup(build) {
+            build.onEnd(result => {
+              if (errorToThrow) throw errorToThrow
+              if (valueToReturn) return valueToReturn
+              if (mutateFn) mutateFn(result)
+              onEndTimes++
+            })
+          },
+        },
+      ],
+    })
+    assert.strictEqual(onEndTimes, 1)
+
+    await result.rebuild()
+    assert.strictEqual(onEndTimes, 2)
+
+    await result.rebuild()
+    assert.strictEqual(onEndTimes, 3)
+
+    errorToThrow = new Error('throw test')
+    try {
+      await result.rebuild()
+      throw new Error('Expected an error to be thrown')
+    } catch (e) {
+      assert.notStrictEqual(e.errors, void 0)
+      assert.strictEqual(e.errors.length, 1)
+      assert.strictEqual(e.errors[0].pluginName, 'some-plugin')
+      assert.strictEqual(e.errors[0].text, 'throw test')
+    } finally {
+      errorToThrow = null
+    }
+
+    assert.strictEqual(onEndTimes, 3)
+    valueToReturn = new Promise(resolve => setTimeout(() => {
+      onEndTimes++
+      resolve()
+    }, 500))
+    await result.rebuild()
+    assert.strictEqual(onEndTimes, 4)
+    valueToReturn = null
+
+    mutateFn = result => result.warnings.push(true)
+    const result2 = await result.rebuild()
+    assert.deepStrictEqual(result2.warnings, [true])
+    mutateFn = () => { }
+    const result3 = await result.rebuild()
+    assert.deepStrictEqual(result3.warnings, [])
+
+    mutateFn = result => result.errors.push({ text: 'test failure' })
+    try {
+      await result.rebuild()
+      throw new Error('Expected an error to be thrown')
+    } catch (e) {
+      assert.notStrictEqual(e.errors, void 0)
+      assert.strictEqual(e.errors.length, 1)
+      assert.strictEqual(e.errors[0].pluginName, void 0)
+      assert.strictEqual(e.errors[0].text, 'test failure')
+      assert.strictEqual(e.errors[0].location, void 0)
+    }
+
+    result.rebuild.dispose()
+  },
+
+  async onStartOnEndWatchMode({ esbuild, testDir }) {
+    const srcDir = path.join(testDir, 'src')
+    const outfile = path.join(testDir, 'out.js')
+    const input = path.join(srcDir, 'in.js')
+    const example = path.join(srcDir, 'example.js')
+    await mkdirAsync(srcDir, { recursive: true })
+    await writeFileAsync(input, `import {x} from "./example.js"; exports.x = x`)
+    await writeFileAsync(example, `export let x = 1`)
+
+    let onStartCalls = 0
+    let onEndCalls = 0
+    let onRebuild = () => { }
+
+    const result = await esbuild.build({
+      entryPoints: [input],
+      outfile,
+      format: 'cjs',
+      logLevel: 'silent',
+      watch: {
+        onRebuild: (...args) => onRebuild(args),
+      },
+      bundle: true,
+      metafile: true,
+      plugins: [
+        {
+          name: 'some-plugin',
+          setup(build) {
+            build.onStart(() => {
+              onStartCalls++
+            })
+            build.onEnd(result => {
+              assert.notStrictEqual(result.metafile, void 0)
+              onEndCalls++
+            })
+
+            build.onLoad({ filter: /example\.js$/ }, async (args) => {
+              const contents = await fs.promises.readFile(args.path, 'utf8')
+              return { contents }
+            })
+          },
+        },
+      ],
+    })
+
+    assert.strictEqual(onStartCalls, 1)
+    assert.strictEqual(onEndCalls, 1)
+
+    const rebuildUntil = (mutator, condition) => {
+      let timeout
+      return new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error('Timeout after 30 seconds')), 30 * 1000)
+        onRebuild = args => {
+          try { if (condition(...args)) clearTimeout(timeout), resolve(args) }
+          catch (e) { clearTimeout(timeout), reject(e) }
+        }
+        mutator()
+      })
+    }
+
+    try {
+      let code = await readFileAsync(outfile, 'utf8')
+      let exports = {}
+      new Function('exports', code)(exports)
+      assert.strictEqual(result.outputFiles, void 0)
+      assert.strictEqual(typeof result.stop, 'function')
+      assert.strictEqual(exports.x, 1)
+
+      // First rebuild: edit
+      {
+        const [error2, result2] = await rebuildUntil(
+          () => setTimeout(() => writeFileAtomic(example, `export let x = 2`), 250),
+          () => fs.readFileSync(outfile, 'utf8') !== code,
+        )
+        code = await readFileAsync(outfile, 'utf8')
+        exports = {}
+        new Function('exports', code)(exports)
+        assert.strictEqual(error2, null)
+        assert.strictEqual(result2.outputFiles, void 0)
+        assert.strictEqual(result2.stop, result.stop)
+        assert.strictEqual(exports.x, 2)
+      }
+
+      assert.notStrictEqual(onStartCalls, 1)
+      assert.notStrictEqual(onEndCalls, 1)
+    } finally {
+      result.stop()
+    }
+  },
 }
 
 async function main() {
@@ -2151,7 +2514,7 @@ async function main() {
   // Time out these tests after 5 minutes. This exists to help debug test hangs in CI.
   let minutes = 5
   let timeout = setTimeout(() => {
-    console.error(`❌ js api tests timed out after ${minutes} minutes, exiting...`)
+    console.error(`❌ plugin tests timed out after ${minutes} minutes, exiting...`)
     process.exit(1)
   }, minutes * 60 * 1000)
 

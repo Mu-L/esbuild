@@ -136,6 +136,29 @@ func validateSourceMap(value SourceMap) config.SourceMap {
 	}
 }
 
+func validateLegalComments(value LegalComments, bundle bool) config.LegalComments {
+	switch value {
+	case LegalCommentsDefault:
+		if bundle {
+			return config.LegalCommentsEndOfFile
+		} else {
+			return config.LegalCommentsInline
+		}
+	case LegalCommentsNone:
+		return config.LegalCommentsNone
+	case LegalCommentsInline:
+		return config.LegalCommentsInline
+	case LegalCommentsEndOfFile:
+		return config.LegalCommentsEndOfFile
+	case LegalCommentsLinked:
+		return config.LegalCommentsLinkedWithComment
+	case LegalCommentsExternal:
+		return config.LegalCommentsExternalWithoutComment
+	default:
+		panic("Invalid source map")
+	}
+}
+
 func validateColor(value StderrColor) logger.UseColor {
 	switch value {
 	case ColorIfTerminal:
@@ -244,7 +267,11 @@ func validateEngine(value EngineName) compat.Engine {
 
 var versionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?$`)
 
-func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.JSFeature, compat.CSSFeature, string) {
+func validateFeatures(log logger.Log, target Target, engines []Engine) (bool, compat.JSFeature, compat.CSSFeature, string) {
+	if target == DefaultTarget && len(engines) == 0 {
+		return true, 0, 0, ""
+	}
+
 	constraints := make(map[compat.Engine][]int)
 	targets := make([]string, 0, 1+len(engines))
 
@@ -263,7 +290,9 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.J
 		constraints[compat.ES] = []int{2019}
 	case ES2020:
 		constraints[compat.ES] = []int{2020}
-	case ESNext:
+	case ES2021:
+		constraints[compat.ES] = []int{2021}
+	case ESNext, DefaultTarget:
 	default:
 		panic("Invalid target")
 	}
@@ -317,7 +346,7 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.J
 	sort.Strings(targets)
 	targetEnv := strings.Join(targets, ", ")
 
-	return compat.UnsupportedJSFeatures(constraints), compat.UnsupportedCSSFeatures(constraints), targetEnv
+	return false, compat.UnsupportedJSFeatures(constraints), compat.UnsupportedCSSFeatures(constraints), targetEnv
 }
 
 func validateGlobalName(log logger.Log, text string) []string {
@@ -389,18 +418,12 @@ func validateLoaders(log logger.Log, loaders map[string]Loader) map[string]confi
 	return result
 }
 
-func validateJSX(log logger.Log, text string, name string) []string {
-	if text == "" {
-		return nil
+func validateJSXExpr(log logger.Log, text string, name string, kind js_parser.JSXExprKind) config.JSXExpr {
+	if expr, ok := js_parser.ParseJSXExpr(text, kind); ok {
+		return expr
 	}
-	parts := strings.Split(text, ".")
-	for _, part := range parts {
-		if !js_lexer.IsIdentifier(part) {
-			log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid JSX %s: %q", name, text))
-			return nil
-		}
-	}
-	return parts
+	log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid JSX %s: %q", name, text))
+	return config.JSXExpr{}
 }
 
 func validateDefines(
@@ -418,7 +441,11 @@ func validateDefines(
 		// The key must be a dot-separated identifier list
 		for _, part := range strings.Split(key, ".") {
 			if !js_lexer.IsIdentifier(part) {
-				log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid define key: %q", key))
+				if part == key {
+					log.AddError(nil, logger.Loc{}, fmt.Sprintf("The define key %q must be a valid identifier", key))
+				} else {
+					log.AddError(nil, logger.Loc{}, fmt.Sprintf("The define key %q contains invalid identifier %q", key, part))
+				}
 				continue
 			}
 		}
@@ -438,7 +465,7 @@ func validateDefines(
 
 		// Parse the value as JSON
 		source := logger.Source{Contents: value}
-		expr, ok := js_parser.ParseJSON(logger.NewDeferLog(), source, js_parser.JSONOptions{})
+		expr, ok := js_parser.ParseJSON(logger.NewDeferLog(logger.DeferLogAll), source, js_parser.JSONOptions{})
 		if !ok {
 			log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid define value (must be valid JSON syntax or a single identifier): %s", value))
 			continue
@@ -448,7 +475,7 @@ func validateDefines(
 		switch e := expr.Data.(type) {
 		// These values are inserted inline, and can participate in constant folding
 		case *js_ast.ENull:
-			fn = func(config.DefineArgs) js_ast.E { return &js_ast.ENull{} }
+			fn = func(config.DefineArgs) js_ast.E { return js_ast.ENullShared }
 		case *js_ast.EBoolean:
 			fn = func(config.DefineArgs) js_ast.E { return &js_ast.EBoolean{Value: e.Value} }
 		case *js_ast.EString:
@@ -600,10 +627,11 @@ func convertMessagesToPublic(kind logger.MsgKind, msgs []logger.Msg) []Message {
 				})
 			}
 			filtered = append(filtered, Message{
-				Text:     msg.Data.Text,
-				Location: convertLocationToPublic(msg.Data.Location),
-				Notes:    notes,
-				Detail:   msg.Data.UserDetail,
+				PluginName: msg.PluginName,
+				Text:       msg.Data.Text,
+				Location:   convertLocationToPublic(msg.Data.Location),
+				Notes:      notes,
+				Detail:     msg.Data.UserDetail,
 			})
 		}
 	}
@@ -639,7 +667,8 @@ func convertMessagesToInternal(msgs []logger.Msg, kind logger.MsgKind, messages 
 			})
 		}
 		msgs = append(msgs, logger.Msg{
-			Kind: kind,
+			PluginName: message.PluginName,
+			Kind:       kind,
 			Data: logger.MsgData{
 				Text:       message.Text,
 				Location:   convertLocationToInternal(message.Location),
@@ -683,12 +712,12 @@ func buildImpl(buildOpts BuildOptions) internalBuildResult {
 	// directory doesn't change, since breaking that invariant would break the
 	// validation that we just did above.
 	oldAbsWorkingDir := buildOpts.AbsWorkingDir
-	plugins := loadPlugins(&buildOpts, realFS, log)
+	plugins, onEndCallbacks := loadPlugins(&buildOpts, realFS, log)
 	if buildOpts.AbsWorkingDir != oldAbsWorkingDir {
 		panic("Mutating \"AbsWorkingDir\" is not allowed")
 	}
 
-	internalResult := rebuildImpl(buildOpts, cache.MakeCacheSet(), plugins, logOptions, log, false /* isRebuild */)
+	internalResult := rebuildImpl(buildOpts, cache.MakeCacheSet(), plugins, onEndCallbacks, logOptions, log, false /* isRebuild */)
 
 	// Print a summary of the generated files to stderr. Except don't do
 	// this if the terminal is already being used for something else.
@@ -751,6 +780,7 @@ func rebuildImpl(
 	buildOpts BuildOptions,
 	caches *cache.CacheSet,
 	plugins []config.Plugin,
+	onEndCallbacks []func(*BuildResult),
 	logOptions logger.OutputOptions,
 	log logger.Log,
 	isRebuild bool,
@@ -764,29 +794,33 @@ func rebuildImpl(
 		// This should already have been checked above
 		panic(err.Error())
 	}
-	jsFeatures, cssFeatures, targetEnv := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
+	isTargetUnconfigured, jsFeatures, cssFeatures, targetEnv := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
 	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
 	bannerJS, bannerCSS := validateBannerOrFooter(log, "banner", buildOpts.Banner)
 	footerJS, footerCSS := validateBannerOrFooter(log, "footer", buildOpts.Footer)
 	minify := buildOpts.MinifyWhitespace && buildOpts.MinifyIdentifiers && buildOpts.MinifySyntax
 	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure, buildOpts.Platform, minify)
 	options := config.Options{
+		IsTargetUnconfigured:   isTargetUnconfigured,
 		UnsupportedJSFeatures:  jsFeatures,
 		UnsupportedCSSFeatures: cssFeatures,
 		OriginalTargetEnv:      targetEnv,
 		JSX: config.JSXOptions{
-			Factory:  validateJSX(log, buildOpts.JSXFactory, "factory"),
-			Fragment: validateJSX(log, buildOpts.JSXFragment, "fragment"),
+			Preserve: buildOpts.JSXMode == JSXModePreserve,
+			Factory:  validateJSXExpr(log, buildOpts.JSXFactory, "factory", js_parser.JSXFactory),
+			Fragment: validateJSXExpr(log, buildOpts.JSXFragment, "fragment", js_parser.JSXFragment),
 		},
 		Defines:               defines,
 		InjectedDefines:       injectedDefines,
 		Platform:              validatePlatform(buildOpts.Platform),
 		SourceMap:             validateSourceMap(buildOpts.Sourcemap),
+		LegalComments:         validateLegalComments(buildOpts.LegalComments, buildOpts.Bundle),
 		SourceRoot:            buildOpts.SourceRoot,
 		ExcludeSourcesContent: buildOpts.SourcesContent == SourcesContentExclude,
 		MangleSyntax:          buildOpts.MinifySyntax,
 		RemoveWhitespace:      buildOpts.MinifyWhitespace,
 		MinifyIdentifiers:     buildOpts.MinifyIdentifiers,
+		AllowOverwrite:        buildOpts.AllowOverwrite,
 		ASCIIOnly:             validateASCIIOnly(buildOpts.Charset),
 		IgnoreDCEAnnotations:  validateIgnoreDCEAnnotations(buildOpts.TreeShaking),
 		GlobalName:            validateGlobalName(log, buildOpts.GlobalName),
@@ -864,6 +898,9 @@ func rebuildImpl(
 		if options.SourceMap != config.SourceMapNone && options.SourceMap != config.SourceMapInline {
 			log.AddError(nil, logger.Loc{}, "Cannot use an external source map without an output path")
 		}
+		if options.LegalComments.HasExternalFile() {
+			log.AddError(nil, logger.Loc{}, "Cannot use linked or external legal comments without an output path")
+		}
 		for _, loader := range options.ExtensionToLoader {
 			if loader == config.LoaderFile {
 				log.AddError(nil, logger.Loc{}, "Cannot use the \"file\" loader without an output path")
@@ -925,10 +962,11 @@ func rebuildImpl(
 		if !log.HasErrors() {
 			// Compile the bundle
 			results, metafile := bundle.Compile(log, options, timer)
-			metafileJSON = metafile
 
 			// Stop now if there were errors
 			if !log.HasErrors() {
+				metafileJSON = metafile
+
 				// Flush any deferred warnings now
 				log.AlmostDone()
 
@@ -951,7 +989,7 @@ func rebuildImpl(
 							go func(result graph.OutputFile) {
 								fs.BeforeFileOpen()
 								defer fs.AfterFileClose()
-								if err := os.MkdirAll(realFS.Dir(result.AbsPath), 0755); err != nil {
+								if err := fs.MkdirAll(realFS, realFS.Dir(result.AbsPath), 0755); err != nil {
 									log.AddError(nil, logger.Loc{}, fmt.Sprintf(
 										"Failed to create output directory: %s", err.Error()))
 								} else {
@@ -1001,7 +1039,7 @@ func rebuildImpl(
 			data:     watchData,
 			resolver: resolver,
 			rebuild: func() fs.WatchData {
-				value := rebuildImpl(buildOpts, caches, plugins, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
+				value := rebuildImpl(buildOpts, caches, plugins, onEndCallbacks, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
 				if onRebuild != nil {
 					go onRebuild(value.result)
 				}
@@ -1018,7 +1056,7 @@ func rebuildImpl(
 	var rebuild func() BuildResult
 	if buildOpts.Incremental {
 		rebuild = func() BuildResult {
-			value := rebuildImpl(buildOpts, caches, plugins, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
+			value := rebuildImpl(buildOpts, caches, plugins, onEndCallbacks, logOptions, logger.NewStderrLog(logOptions), true /* isRebuild */)
 			if watch != nil {
 				watch.setWatchData(value.watchData)
 			}
@@ -1034,6 +1072,11 @@ func rebuildImpl(
 		Rebuild:     rebuild,
 		Stop:        stop,
 	}
+
+	for _, onEnd := range onEndCallbacks {
+		onEnd(&result)
+	}
+
 	return internalBuildResult{
 		result:    result,
 		options:   options,
@@ -1201,11 +1244,13 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 	preserveUnusedImportsTS := false
 	useDefineForClassFieldsTS := config.Unspecified
 	jsx := config.JSXOptions{
-		Factory:  validateJSX(log, transformOpts.JSXFactory, "factory"),
-		Fragment: validateJSX(log, transformOpts.JSXFragment, "fragment"),
+		Preserve: transformOpts.JSXMode == JSXModePreserve,
+		Factory:  validateJSXExpr(log, transformOpts.JSXFactory, "factory", js_parser.JSXFactory),
+		Fragment: validateJSXExpr(log, transformOpts.JSXFragment, "fragment", js_parser.JSXFragment),
 	}
 
 	// Settings from "tsconfig.json" override those
+	var tsTarget *config.TSTarget
 	caches := cache.MakeCacheSet()
 	if transformOpts.TsconfigRaw != "" {
 		source := logger.Source{
@@ -1215,10 +1260,10 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		}
 		if result := resolver.ParseTSConfigJSON(log, source, &caches.JSONCache, nil); result != nil {
 			if len(result.JSXFactory) > 0 {
-				jsx.Factory = result.JSXFactory
+				jsx.Factory = config.JSXExpr{Parts: result.JSXFactory}
 			}
 			if len(result.JSXFragmentFactory) > 0 {
-				jsx.Fragment = result.JSXFragmentFactory
+				jsx.Fragment = config.JSXExpr{Parts: result.JSXFragmentFactory}
 			}
 			if result.UseDefineForClassFields != config.Unspecified {
 				useDefineForClassFieldsTS = result.UseDefineForClassFields
@@ -1226,6 +1271,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 			if result.PreserveImportsNotUsedAsValues {
 				preserveUnusedImportsTS = true
 			}
+			tsTarget = result.TSTarget
 		}
 	}
 
@@ -1238,16 +1284,19 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 	}
 
 	// Convert and validate the transformOpts
-	jsFeatures, cssFeatures, targetEnv := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
+	isTargetUnconfigured, jsFeatures, cssFeatures, targetEnv := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
 	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure, PlatformNeutral, false /* minify */)
 	options := config.Options{
+		IsTargetUnconfigured:    isTargetUnconfigured,
 		UnsupportedJSFeatures:   jsFeatures,
 		UnsupportedCSSFeatures:  cssFeatures,
 		OriginalTargetEnv:       targetEnv,
+		TSTarget:                tsTarget,
 		JSX:                     jsx,
 		Defines:                 defines,
 		InjectedDefines:         injectedDefines,
 		SourceMap:               validateSourceMap(transformOpts.Sourcemap),
+		LegalComments:           validateLegalComments(transformOpts.LegalComments, false /* bundle */),
 		SourceRoot:              transformOpts.SourceRoot,
 		ExcludeSourcesContent:   transformOpts.SourcesContent == SourcesContentExclude,
 		OutputFormat:            validateFormat(transformOpts.Format),
@@ -1281,6 +1330,9 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 	if options.SourceMap != config.SourceMapNone && options.Stdin.SourceFile == "" {
 		log.AddError(nil, logger.Loc{},
 			"Must use \"sourcefile\" with \"sourcemap\" to set the original file name")
+	}
+	if options.LegalComments.HasExternalFile() {
+		log.AddError(nil, logger.Loc{}, "Cannot transform with linked or external legal comments")
 	}
 
 	// Set the output mode using other settings
@@ -1345,6 +1397,30 @@ type pluginImpl struct {
 	plugin config.Plugin
 }
 
+func (impl *pluginImpl) OnStart(callback func() (OnStartResult, error)) {
+	impl.plugin.OnStart = append(impl.plugin.OnStart, config.OnStart{
+		Name: impl.plugin.Name,
+		Callback: func() (result config.OnStartResult) {
+			response, err := callback()
+
+			if err != nil {
+				result.ThrownError = err
+				return
+			}
+
+			// Convert log messages
+			if len(response.Errors)+len(response.Warnings) > 0 {
+				msgs := make(logger.SortableMsgs, 0, len(response.Errors)+len(response.Warnings))
+				msgs = convertMessagesToInternal(msgs, logger.Error, response.Errors)
+				msgs = convertMessagesToInternal(msgs, logger.Warning, response.Warnings)
+				sort.Stable(msgs)
+				result.Msgs = msgs
+			}
+			return
+		},
+	})
+}
+
 func (impl *pluginImpl) OnResolve(options OnResolveOptions, callback func(OnResolveArgs) (OnResolveResult, error)) {
 	filter, err := config.CompileFilterForPlugin(impl.plugin.Name, "OnResolve", options.Filter)
 	if filter == nil {
@@ -1396,6 +1472,7 @@ func (impl *pluginImpl) OnResolve(options OnResolveOptions, callback func(OnReso
 
 			result.Path = logger.Path{Text: response.Path, Namespace: response.Namespace}
 			result.External = response.External
+			result.IsSideEffectFree = response.SideEffects == SideEffectsFalse
 			result.PluginData = response.PluginData
 
 			// Convert log messages
@@ -1469,7 +1546,11 @@ func (impl *pluginImpl) validatePathsArray(pathsIn []string, name string) (paths
 	return
 }
 
-func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log) (results []config.Plugin) {
+func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log) (plugins []config.Plugin, onEndCallbacks []func(*BuildResult)) {
+	onEnd := func(callback func(*BuildResult)) {
+		onEndCallbacks = append(onEndCallbacks, callback)
+	}
+
 	// Clone the plugin array to guard against mutation during iteration
 	clone := append(make([]Plugin, 0, len(initialOptions.Plugins)), initialOptions.Plugins...)
 
@@ -1487,11 +1568,13 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log) (result
 
 		item.Setup(PluginBuild{
 			InitialOptions: initialOptions,
+			OnStart:        impl.OnStart,
+			OnEnd:          onEnd,
 			OnResolve:      impl.OnResolve,
 			OnLoad:         impl.OnLoad,
 		})
 
-		results = append(results, impl.plugin)
+		plugins = append(plugins, impl.plugin)
 	}
 	return
 }

@@ -1,7 +1,13 @@
 ESBUILD_VERSION = $(shell cat version.txt)
 
+# Strip debug info
+GO_FLAGS += "-ldflags=-s -w"
+
+# Avoid embedding the build path in the executable for more reproducible builds
+GO_FLAGS += -trimpath
+
 esbuild: cmd/esbuild/version.go cmd/esbuild/*.go pkg/*/*.go internal/*/*.go go.mod
-	go build "-ldflags=-s -w" ./cmd/esbuild
+	CGO_ENABLED=0 go build $(GO_FLAGS) ./cmd/esbuild
 
 test:
 	make -j6 test-common
@@ -46,7 +52,7 @@ test-wasm-browser: platform-wasm | scripts/browser/node_modules
 	cd scripts/browser && node browser-tests.js
 
 test-deno: esbuild platform-deno
-	ESBUILD_BINARY_PATH="$(shell pwd)/esbuild" deno run --allow-run --allow-env --allow-net --allow-read --allow-write scripts/deno-tests.js
+	ESBUILD_BINARY_PATH="$(shell pwd)/esbuild" deno test --allow-run --allow-env --allow-net --allow-read --allow-write --no-check scripts/deno-tests.js
 
 register-test: cmd/esbuild/version.go | scripts/node_modules
 	cd npm/esbuild && npm version "$(ESBUILD_VERSION)" --allow-same-version
@@ -110,6 +116,7 @@ platform-all: cmd/esbuild/version.go test-all
 		platform-darwin-arm64 \
 		platform-freebsd \
 		platform-freebsd-arm64 \
+		platform-openbsd \
 		platform-linux \
 		platform-linux-32 \
 		platform-linux-arm \
@@ -122,17 +129,17 @@ platform-all: cmd/esbuild/version.go test-all
 
 platform-windows:
 	cd npm/esbuild-windows-64 && npm version "$(ESBUILD_VERSION)" --allow-same-version
-	GOOS=windows GOARCH=amd64 go build "-ldflags=-s -w" -o npm/esbuild-windows-64/esbuild.exe ./cmd/esbuild
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_FLAGS) -o npm/esbuild-windows-64/esbuild.exe ./cmd/esbuild
 
 platform-windows-32:
 	cd npm/esbuild-windows-32 && npm version "$(ESBUILD_VERSION)" --allow-same-version
-	GOOS=windows GOARCH=386 go build "-ldflags=-s -w" -o npm/esbuild-windows-32/esbuild.exe ./cmd/esbuild
+	CGO_ENABLED=0 GOOS=windows GOARCH=386 go build $(GO_FLAGS) -o npm/esbuild-windows-32/esbuild.exe ./cmd/esbuild
 
 platform-unixlike:
 	test -n "$(GOOS)" && test -n "$(GOARCH)" && test -n "$(NPMDIR)"
 	mkdir -p "$(NPMDIR)/bin"
 	cd "$(NPMDIR)" && npm version "$(ESBUILD_VERSION)" --allow-same-version
-	GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build "-ldflags=-s -w" -o "$(NPMDIR)/bin/esbuild" ./cmd/esbuild
+	CGO_ENABLED=0 GOOS="$(GOOS)" GOARCH="$(GOARCH)" go build $(GO_FLAGS) -o "$(NPMDIR)/bin/esbuild" ./cmd/esbuild
 
 platform-android-arm64:
 	make GOOS=android GOARCH=arm64 NPMDIR=npm/esbuild-android-arm64 platform-unixlike
@@ -148,6 +155,9 @@ platform-freebsd:
 
 platform-freebsd-arm64:
 	make GOOS=freebsd GOARCH=arm64 NPMDIR=npm/esbuild-freebsd-arm64 platform-unixlike
+
+platform-openbsd:
+	make GOOS=openbsd GOARCH=amd64 NPMDIR=npm/esbuild-openbsd-64 platform-unixlike
 
 platform-linux:
 	make GOOS=linux GOARCH=amd64 NPMDIR=npm/esbuild-linux-64 platform-unixlike
@@ -192,6 +202,7 @@ publish-all: cmd/esbuild/version.go test-prepublish
 		publish-windows-32 \
 		publish-freebsd \
 		publish-freebsd-arm64 \
+		publish-openbsd \
 		publish-darwin \
 		publish-darwin-arm64
 	@echo Enter one-time password:
@@ -234,6 +245,9 @@ publish-freebsd: platform-freebsd
 publish-freebsd-arm64: platform-freebsd-arm64
 	test -n "$(OTP)" && cd npm/esbuild-freebsd-arm64 && npm publish --otp="$(OTP)"
 
+publish-openbsd: platform-openbsd
+	test -n "$(OTP)" && cd npm/esbuild-openbsd-64 && npm publish --otp="$(OTP)"
+
 publish-linux: platform-linux
 	test -n "$(OTP)" && cd npm/esbuild-linux-64 && npm publish --otp="$(OTP)"
 
@@ -259,8 +273,8 @@ publish-neutral: platform-neutral
 	test -n "$(OTP)" && cd npm/esbuild && npm publish --otp="$(OTP)"
 
 publish-deno:
-	test -f deno/.git || (rm -fr deno && git clone git@github.com:esbuild/deno-esbuild.git deno)
-	cd deno && git fetch && git reset --hard origin/main
+	test -d deno/.git || (rm -fr deno && git clone git@github.com:esbuild/deno-esbuild.git deno)
+	cd deno && git fetch && git checkout main && git reset --hard origin/main
 	make platform-deno
 	cd deno && git commit -am "publish $(ESBUILD_VERSION) to deno"
 	cd deno && git tag "v$(ESBUILD_VERSION)"
@@ -275,6 +289,7 @@ clean:
 	rm -rf npm/esbuild-darwin-arm64/bin
 	rm -rf npm/esbuild-freebsd-64/bin
 	rm -rf npm/esbuild-freebsd-amd64/bin
+	rm -rf npm/esbuild-openbsd-64/bin
 	rm -rf npm/esbuild-linux-32/bin
 	rm -rf npm/esbuild-linux-64/bin
 	rm -rf npm/esbuild-linux-arm/bin
@@ -383,7 +398,7 @@ TEST_ROLLUP_FLAGS += src/node-entry.ts
 
 github/rollup:
 	mkdir -p github
-	git clone --depth 1 --branch v2.15.0 https://github.com/rollup/rollup.git github/rollup
+	git clone --depth 1 --branch v2.50.1 https://github.com/rollup/rollup.git github/rollup
 
 demo/rollup: | github/rollup
 	mkdir -p demo
@@ -696,9 +711,11 @@ bench-rome: bench-rome-esbuild bench-rome-webpack bench-rome-webpack5 bench-rome
 bench-rome-esbuild: esbuild | bench/rome bench/rome-verify
 	rm -fr bench/rome/esbuild
 	time -p ./esbuild --bundle --sourcemap --minify bench/rome/src/entry.ts --outfile=bench/rome/esbuild/rome.esbuild.js --platform=node --timing
-	du -h bench/rome/esbuild/rome.esbuild.js*
-	shasum bench/rome/esbuild/rome.esbuild.js*
-	cd bench/rome-verify && rm -fr esbuild && ROME_CACHE=0 node ../rome/esbuild/rome.esbuild.js bundle packages/rome esbuild
+	time -p ./esbuild --bundle --sourcemap --minify bench/rome/src/entry.ts --outfile=bench/rome/esbuild/rome.esbuild.js --platform=node --timing
+	time -p ./esbuild --bundle --sourcemap --minify bench/rome/src/entry.ts --outfile=bench/rome/esbuild/rome.esbuild.js --platform=node --timing
+	# du -h bench/rome/esbuild/rome.esbuild.js*
+	# shasum bench/rome/esbuild/rome.esbuild.js*
+	# cd bench/rome-verify && rm -fr esbuild && ROME_CACHE=0 node ../rome/esbuild/rome.esbuild.js bundle packages/rome esbuild
 
 ROME_WEBPACK_CONFIG += module.exports = {
 ROME_WEBPACK_CONFIG +=   entry: './src/entry.ts',
@@ -802,16 +819,12 @@ bench-rome-parcel2: | require/parcel2/node_modules bench/rome bench/rome-verify
 	# Inject aliases into "package.json" to fix Parcel 2 ignoring "tsconfig.json".
 	# Also inject "engines": "node" to avoid Parcel 2 mangling node globals.
 	cat require/parcel2/package.json | sed '/^\}/d' > bench/rome/parcel2/package.json
-	echo ', "engines": { "node": "0.0.0" }' >> bench/rome/parcel2/package.json
+	echo ', "engines": { "node": "14.0.0" }' >> bench/rome/parcel2/package.json
 	echo ', $(ROME_PARCEL_ALIASES) }' >> bench/rome/parcel2/package.json
 
-	# Work around a bug that causes the resulting bundle to crash when run.
-	# See https://github.com/parcel-bundler/parcel/issues/1762 for more info.
-	echo 'import "regenerator-runtime/runtime"; import "./entry.ts"' > bench/rome/parcel2/rome.parcel.ts
-
-	cd bench/rome/parcel2 && time -p node_modules/.bin/parcel build rome.parcel.ts --dist-dir . --cache-dir .cache
-	du -h bench/rome/parcel2/rome.parcel.js*
-	cd bench/rome-verify && rm -fr parcel2 && ROME_CACHE=0 node ../rome/parcel2/rome.parcel.js bundle packages/rome parcel2
+	cd bench/rome/parcel2 && time -p node_modules/.bin/parcel build entry.ts --dist-dir . --cache-dir .cache
+	du -h bench/rome/parcel2/entry.js*
+	cd bench/rome-verify && rm -fr parcel2 && ROME_CACHE=0 node ../rome/parcel2/entry.js bundle packages/rome parcel2
 
 ################################################################################
 # React admin benchmark (measures performance of an application-like setup)

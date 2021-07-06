@@ -94,10 +94,29 @@ const (
 	SourcesContentExclude
 )
 
+type LegalComments uint8
+
+const (
+	LegalCommentsDefault LegalComments = iota
+	LegalCommentsNone
+	LegalCommentsInline
+	LegalCommentsEndOfFile
+	LegalCommentsLinked
+	LegalCommentsExternal
+)
+
+type JSXMode uint8
+
+const (
+	JSXModeTransform JSXMode = iota
+	JSXModePreserve
+)
+
 type Target uint8
 
 const (
-	ESNext Target = iota
+	DefaultTarget Target = iota
+	ESNext
 	ES5
 	ES2015
 	ES2016
@@ -105,6 +124,7 @@ const (
 	ES2018
 	ES2019
 	ES2020
+	ES2021
 )
 
 type Loader uint8
@@ -169,9 +189,10 @@ type Location struct {
 }
 
 type Message struct {
-	Text     string
-	Location *Location
-	Notes    []Note
+	PluginName string
+	Text       string
+	Location   *Location
+	Notes      []Note
 
 	// Optional user-specified data that is passed through unmodified. You can
 	// use this to stash the original error, for example.
@@ -237,7 +258,9 @@ type BuildOptions struct {
 	MinifySyntax      bool
 	Charset           Charset
 	TreeShaking       TreeShaking
+	LegalComments     LegalComments
 
+	JSXMode     JSXMode
 	JSXFactory  string
 	JSXFragment string
 
@@ -276,10 +299,11 @@ type BuildOptions struct {
 	EntryPoints         []string
 	EntryPointsAdvanced []EntryPoint
 
-	Stdin       *StdinOptions
-	Write       bool
-	Incremental bool
-	Plugins     []Plugin
+	Stdin          *StdinOptions
+	Write          bool
+	AllowOverwrite bool
+	Incremental    bool
+	Plugins        []Plugin
 
 	Watch *WatchMode
 }
@@ -342,9 +366,12 @@ type TransformOptions struct {
 	MinifySyntax      bool
 	Charset           Charset
 	TreeShaking       TreeShaking
+	LegalComments     LegalComments
 
+	JSXMode     JSXMode
 	JSXFactory  string
 	JSXFragment string
+
 	TsconfigRaw string
 	Footer      string
 	Banner      string
@@ -401,6 +428,13 @@ func Serve(serveOptions ServeOptions, buildOptions BuildOptions) (ServeResult, e
 ////////////////////////////////////////////////////////////////////////////////
 // Plugin API
 
+type SideEffects uint8
+
+const (
+	SideEffectsTrue SideEffects = iota
+	SideEffectsFalse
+)
+
 type Plugin struct {
 	Name  string
 	Setup func(PluginBuild)
@@ -408,8 +442,15 @@ type Plugin struct {
 
 type PluginBuild struct {
 	InitialOptions *BuildOptions
+	OnStart        func(callback func() (OnStartResult, error))
+	OnEnd          func(callback func(result *BuildResult))
 	OnResolve      func(options OnResolveOptions, callback func(OnResolveArgs) (OnResolveResult, error))
 	OnLoad         func(options OnLoadOptions, callback func(OnLoadArgs) (OnLoadResult, error))
+}
+
+type OnStartResult struct {
+	Errors   []Message
+	Warnings []Message
 }
 
 type OnResolveOptions struct {
@@ -432,10 +473,11 @@ type OnResolveResult struct {
 	Errors   []Message
 	Warnings []Message
 
-	Path       string
-	External   bool
-	Namespace  string
-	PluginData interface{}
+	Path        string
+	External    bool
+	SideEffects SideEffects
+	Namespace   string
+	PluginData  interface{}
 
 	WatchFiles []string
 	WatchDirs  []string

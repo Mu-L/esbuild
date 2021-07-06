@@ -1,12 +1,13 @@
 export type Platform = 'browser' | 'node' | 'neutral';
 export type Format = 'iife' | 'cjs' | 'esm';
 export type Loader = 'js' | 'jsx' | 'ts' | 'tsx' | 'css' | 'json' | 'text' | 'base64' | 'file' | 'dataurl' | 'binary' | 'default';
-export type LogLevel = 'debug' | 'info' | 'warning' | 'error' | 'silent';
+export type LogLevel = 'verbose' | 'debug' | 'info' | 'warning' | 'error' | 'silent';
 export type Charset = 'ascii' | 'utf8';
 export type TreeShaking = true | 'ignore-annotations';
 
 interface CommonOptions {
   sourcemap?: boolean | 'inline' | 'external' | 'both';
+  legalComments?: 'none' | 'inline' | 'eof' | 'linked' | 'external';
   sourceRoot?: string;
   sourcesContent?: boolean;
 
@@ -21,8 +22,10 @@ interface CommonOptions {
   charset?: Charset;
   treeShaking?: TreeShaking;
 
+  jsx?: 'transform' | 'preserve';
   jsxFactory?: string;
   jsxFragment?: string;
+
   define?: { [key: string]: string };
   pure?: string[];
   keepNames?: boolean;
@@ -47,6 +50,7 @@ export interface BuildOptions extends CommonOptions {
   mainFields?: string[];
   conditions?: string[];
   write?: boolean;
+  allowOverwrite?: boolean;
   tsconfig?: string;
   outExtension?: { [ext: string]: string };
   publicPath?: string;
@@ -77,6 +81,7 @@ export interface StdinOptions {
 }
 
 export interface Message {
+  pluginName: string;
   text: string;
   location: Location | null;
   notes: Note[];
@@ -117,6 +122,7 @@ export interface BuildIncremental extends BuildResult {
 }
 
 export interface BuildResult {
+  errors: Message[];
   warnings: Message[];
   outputFiles?: OutputFile[]; // Only when "write: false"
   rebuild?: BuildInvalidate; // Only when "incremental: true"
@@ -185,10 +191,19 @@ export interface Plugin {
 
 export interface PluginBuild {
   initialOptions: BuildOptions;
+  onStart(callback: () =>
+    (OnStartResult | null | void | Promise<OnStartResult | null | void>)): void;
+  onEnd(callback: (result: BuildResult) =>
+    (void | Promise<void>)): void;
   onResolve(options: OnResolveOptions, callback: (args: OnResolveArgs) =>
     (OnResolveResult | null | undefined | Promise<OnResolveResult | null | undefined>)): void;
   onLoad(options: OnLoadOptions, callback: (args: OnLoadArgs) =>
     (OnLoadResult | null | undefined | Promise<OnLoadResult | null | undefined>)): void;
+}
+
+export interface OnStartResult {
+  errors?: PartialMessage[];
+  warnings?: PartialMessage[];
 }
 
 export interface OnResolveOptions {
@@ -226,6 +241,7 @@ export interface OnResolveResult {
 
   path?: string;
   external?: boolean;
+  sideEffects?: boolean;
   namespace?: string;
   pluginData?: any;
 
@@ -260,6 +276,7 @@ export interface OnLoadResult {
 }
 
 export interface PartialMessage {
+  pluginName?: string;
   text?: string;
   location?: Partial<Location> | null;
   notes?: PartialNote[];

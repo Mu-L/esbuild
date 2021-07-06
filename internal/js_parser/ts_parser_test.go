@@ -3,109 +3,61 @@ package js_parser
 import (
 	"testing"
 
+	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
-	"github.com/evanw/esbuild/internal/js_ast"
-	"github.com/evanw/esbuild/internal/js_printer"
-	"github.com/evanw/esbuild/internal/logger"
-	"github.com/evanw/esbuild/internal/renamer"
-	"github.com/evanw/esbuild/internal/test"
 )
 
 func expectParseErrorTS(t *testing.T, contents string, expected string) {
 	t.Helper()
-	t.Run(contents, func(t *testing.T) {
-		t.Helper()
-		log := logger.NewDeferLog()
-		Parse(log, test.SourceForTest(contents), OptionsFromConfig(&config.Options{
-			TS: config.TSOptions{
-				Parse: true,
-			},
-		}))
-		msgs := log.Done()
-		text := ""
-		for _, msg := range msgs {
-			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
-		}
-		test.AssertEqual(t, text, expected)
+	expectParseErrorCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
+	})
+}
+
+func expectParseErrorTargetTS(t *testing.T, esVersion int, contents string, expected string) {
+	t.Helper()
+	expectParseErrorCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
+		UnsupportedJSFeatures: compat.UnsupportedJSFeatures(map[compat.Engine][]int{
+			compat.ES: {esVersion},
+		}),
 	})
 }
 
 func expectPrintedTS(t *testing.T, contents string, expected string) {
 	t.Helper()
-	t.Run(contents, func(t *testing.T) {
-		t.Helper()
-		log := logger.NewDeferLog()
-		tree, ok := Parse(log, test.SourceForTest(contents), OptionsFromConfig(&config.Options{
-			TS: config.TSOptions{
-				Parse: true,
-			},
-		}))
-		msgs := log.Done()
-		text := ""
-		for _, msg := range msgs {
-			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
-		}
-		test.AssertEqual(t, text, "")
-		if !ok {
-			t.Fatal("Parse error")
-		}
-		symbols := js_ast.NewSymbolMap(1)
-		symbols.SymbolsForSource[0] = tree.Symbols
-		r := renamer.NewNoOpRenamer(symbols)
-		js := js_printer.Print(tree, symbols, r, js_printer.Options{}).JS
-		test.AssertEqual(t, string(js), expected)
+	expectPrintedCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
 	})
 }
 
 func expectParseErrorTSX(t *testing.T, contents string, expected string) {
 	t.Helper()
-	t.Run(contents, func(t *testing.T) {
-		t.Helper()
-		log := logger.NewDeferLog()
-		Parse(log, test.SourceForTest(contents), OptionsFromConfig(&config.Options{
-			TS: config.TSOptions{
-				Parse: true,
-			},
-			JSX: config.JSXOptions{
-				Parse: true,
-			},
-		}))
-		msgs := log.Done()
-		text := ""
-		for _, msg := range msgs {
-			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
-		}
-		test.AssertEqual(t, text, expected)
+	expectParseErrorCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
+		JSX: config.JSXOptions{
+			Parse: true,
+		},
 	})
 }
 
 func expectPrintedTSX(t *testing.T, contents string, expected string) {
 	t.Helper()
-	t.Run(contents, func(t *testing.T) {
-		t.Helper()
-		log := logger.NewDeferLog()
-		tree, ok := Parse(log, test.SourceForTest(contents), OptionsFromConfig(&config.Options{
-			TS: config.TSOptions{
-				Parse: true,
-			},
-			JSX: config.JSXOptions{
-				Parse: true,
-			},
-		}))
-		msgs := log.Done()
-		text := ""
-		for _, msg := range msgs {
-			text += msg.String(logger.OutputOptions{}, logger.TerminalInfo{})
-		}
-		test.AssertEqual(t, text, "")
-		if !ok {
-			t.Fatal("Parse error")
-		}
-		symbols := js_ast.NewSymbolMap(1)
-		symbols.SymbolsForSource[0] = tree.Symbols
-		r := renamer.NewNoOpRenamer(symbols)
-		js := js_printer.Print(tree, symbols, r, js_printer.Options{}).JS
-		test.AssertEqual(t, string(js), expected)
+	expectPrintedCommon(t, contents, expected, config.Options{
+		TS: config.TSOptions{
+			Parse: true,
+		},
+		JSX: config.JSXOptions{
+			Parse: true,
+		},
 	})
 }
 
@@ -304,27 +256,36 @@ func TestTSClass(t *testing.T) {
 	expectPrintedTS(t, "class A<T extends number> implements B.C<D, E>, F.G<H, I> {}", "class A {\n}\n")
 	expectPrintedTS(t, "class A<T extends number> extends X implements B.C<D, E>, F.G<H, I> {}", "class A extends X {\n}\n")
 
-	expectPrintedTS(t, "class Foo { constructor(public) {} }", "class Foo {\n  constructor(public) {\n  }\n}\n")
-	expectPrintedTS(t, "class Foo { constructor(protected) {} }", "class Foo {\n  constructor(protected) {\n  }\n}\n")
-	expectPrintedTS(t, "class Foo { constructor(private) {} }", "class Foo {\n  constructor(private) {\n  }\n}\n")
+	reservedWordError :=
+		" is a reserved word and cannot be used in strict mode\n" +
+			"<stdin>: note: All code inside a class is implicitly in strict mode\n"
+
+	expectParseErrorTS(t, "class Foo { constructor(public) {} }", "<stdin>: error: \"public\""+reservedWordError)
+	expectParseErrorTS(t, "class Foo { constructor(protected) {} }", "<stdin>: error: \"protected\""+reservedWordError)
+	expectParseErrorTS(t, "class Foo { constructor(private) {} }", "<stdin>: error: \"private\""+reservedWordError)
 	expectPrintedTS(t, "class Foo { constructor(readonly) {} }", "class Foo {\n  constructor(readonly) {\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { constructor(override) {} }", "class Foo {\n  constructor(override) {\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(public x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(protected x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(private x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(readonly x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { constructor(override x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(public readonly x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(protected readonly x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 	expectPrintedTS(t, "class Foo { constructor(private readonly x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
+	expectPrintedTS(t, "class Foo { constructor(override readonly x) {} }", "class Foo {\n  constructor(x) {\n    this.x = x;\n  }\n}\n")
 
 	expectParseErrorTS(t, "class Foo { constructor(public {x}) {} }", "<stdin>: error: Expected identifier but found \"{\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(protected {x}) {} }", "<stdin>: error: Expected identifier but found \"{\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(private {x}) {} }", "<stdin>: error: Expected identifier but found \"{\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(readonly {x}) {} }", "<stdin>: error: Expected identifier but found \"{\"\n")
+	expectParseErrorTS(t, "class Foo { constructor(override {x}) {} }", "<stdin>: error: Expected identifier but found \"{\"\n")
 
 	expectParseErrorTS(t, "class Foo { constructor(public [x]) {} }", "<stdin>: error: Expected identifier but found \"[\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(protected [x]) {} }", "<stdin>: error: Expected identifier but found \"[\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(private [x]) {} }", "<stdin>: error: Expected identifier but found \"[\"\n")
 	expectParseErrorTS(t, "class Foo { constructor(readonly [x]) {} }", "<stdin>: error: Expected identifier but found \"[\"\n")
+	expectParseErrorTS(t, "class Foo { constructor(override [x]) {} }", "<stdin>: error: Expected identifier but found \"[\"\n")
 
 	expectPrintedTS(t, "class Foo { foo: number }", "class Foo {\n}\n")
 	expectPrintedTS(t, "class Foo { foo: number = 0 }", "class Foo {\n  constructor() {\n    this.foo = 0;\n  }\n}\n")
@@ -922,7 +883,7 @@ func TestTSNamespaceDestructuring(t *testing.T) {
   [
     A.a,
     [, A.b = c, ...A.d],
-    {[x]: [[A.y]] = z, ...A.o}
+    { [x]: [[A.y]] = z, ...A.o }
   ] = ref;
 })(A || (A = {}));
 `)
@@ -1010,6 +971,24 @@ var Bar;
 })(Foo || (Foo = {}));
 x = [0, Foo?.A, Foo?.A()];
 y = [0, Foo?.["A"], Foo?.["A"]()];
+`)
+
+	// Check shadowing
+	expectPrintedTS(t, "enum Foo { Foo }", `var Foo;
+(function(_Foo) {
+  _Foo[_Foo["Foo"] = 0] = "Foo";
+})(Foo || (Foo = {}));
+`)
+	expectPrintedTS(t, "enum Foo { Bar = Foo }", `var Foo;
+(function(Foo) {
+  Foo[Foo["Bar"] = Foo] = "Bar";
+})(Foo || (Foo = {}));
+`)
+	expectPrintedTS(t, "enum Foo { Foo = 1, Bar = Foo }", `var Foo;
+(function(_Foo) {
+  _Foo[_Foo["Foo"] = 1] = "Foo";
+  _Foo[_Foo["Bar"] = 1] = "Bar";
+})(Foo || (Foo = {}));
 `)
 }
 
@@ -1144,13 +1123,13 @@ func TestTSDecl(t *testing.T) {
 	expectParseErrorTS(t, "var a! = ", "<stdin>: error: Expected \":\" but found \"=\"\n")
 	expectParseErrorTS(t, "var a!, b", "<stdin>: error: Expected \":\" but found \",\"\n")
 
-	expectPrinted(t, "a ? ({b}) => {} : c", "a ? ({b}) => {\n} : c;\n")
-	expectPrinted(t, "a ? (({b}) => {}) : c", "a ? ({b}) => {\n} : c;\n")
-	expectPrinted(t, "a ? (({b})) : c", "a ? {b} : c;\n")
+	expectPrinted(t, "a ? ({b}) => {} : c", "a ? ({ b }) => {\n} : c;\n")
+	expectPrinted(t, "a ? (({b}) => {}) : c", "a ? ({ b }) => {\n} : c;\n")
+	expectPrinted(t, "a ? (({b})) : c", "a ? { b } : c;\n")
 	expectParseError(t, "a ? (({b})) => {} : c", "<stdin>: error: Invalid binding pattern\n")
-	expectPrintedTS(t, "a ? ({b}) => {} : c", "a ? ({b}) => {\n} : c;\n")
-	expectPrintedTS(t, "a ? (({b}) => {}) : c", "a ? ({b}) => {\n} : c;\n")
-	expectPrintedTS(t, "a ? (({b})) : c", "a ? {b} : c;\n")
+	expectPrintedTS(t, "a ? ({b}) => {} : c", "a ? ({ b }) => {\n} : c;\n")
+	expectPrintedTS(t, "a ? (({b}) => {}) : c", "a ? ({ b }) => {\n} : c;\n")
+	expectPrintedTS(t, "a ? (({b})) : c", "a ? { b } : c;\n")
 	expectParseErrorTS(t, "a ? (({b})) => {} : c", "<stdin>: error: Invalid binding pattern\n")
 }
 
@@ -1266,9 +1245,9 @@ func TestTSTry(t *testing.T) {
 	expectPrintedTS(t, "try {} catch (x: unknown) {}", "try {\n} catch (x) {\n}\n")
 	expectPrintedTS(t, "try {} catch (x: number) {}", "try {\n} catch (x) {\n}\n")
 
-	expectPrintedTS(t, "try {} catch ({x}: any) {}", "try {\n} catch ({x}) {\n}\n")
-	expectPrintedTS(t, "try {} catch ({x}: unknown) {}", "try {\n} catch ({x}) {\n}\n")
-	expectPrintedTS(t, "try {} catch ({x}: number) {}", "try {\n} catch ({x}) {\n}\n")
+	expectPrintedTS(t, "try {} catch ({x}: any) {}", "try {\n} catch ({ x }) {\n}\n")
+	expectPrintedTS(t, "try {} catch ({x}: unknown) {}", "try {\n} catch ({ x }) {\n}\n")
+	expectPrintedTS(t, "try {} catch ({x}: number) {}", "try {\n} catch ({ x }) {\n}\n")
 
 	expectPrintedTS(t, "try {} catch ([x]: any) {}", "try {\n} catch ([x]) {\n}\n")
 	expectPrintedTS(t, "try {} catch ([x]: unknown) {}", "try {\n} catch ([x]) {\n}\n")
@@ -1346,6 +1325,10 @@ func TestTSArrow(t *testing.T) {
 
 	expectPrintedTS(t, "let x: () => {} | ({y: z});", "let x;\n")
 	expectPrintedTS(t, "function x(): ({y: z}) {}", "function x() {\n}\n")
+
+	expectParseErrorTargetTS(t, 5, "return check ? (hover = 2, bar) : baz()", "")
+	expectParseErrorTargetTS(t, 5, "return check ? (hover = 2, bar) => 0 : baz()",
+		"<stdin>: error: Transforming default arguments to the configured target environment is not supported yet\n")
 }
 
 func TestTSCall(t *testing.T) {
@@ -1375,8 +1358,8 @@ func TestTSExponentiation(t *testing.T) {
 
 func TestTSImport(t *testing.T) {
 	expectPrintedTS(t, "import {x} from 'foo'", "")
-	expectPrintedTS(t, "import {x} from 'foo'; log(x)", "import {x} from \"foo\";\nlog(x);\n")
-	expectPrintedTS(t, "import {x, y as z} from 'foo'; log(z)", "import {y as z} from \"foo\";\nlog(z);\n")
+	expectPrintedTS(t, "import {x} from 'foo'; log(x)", "import { x } from \"foo\";\nlog(x);\n")
+	expectPrintedTS(t, "import {x, y as z} from 'foo'; log(z)", "import { y as z } from \"foo\";\nlog(z);\n")
 
 	expectPrintedTS(t, "import x from 'foo'", "")
 	expectPrintedTS(t, "import x from 'foo'; log(x)", "import x from \"foo\";\nlog(x);\n")
@@ -1469,7 +1452,9 @@ func TestTSTypeOnlyImport(t *testing.T) {
 	expectPrintedTS(t, "import type * as foo from 'bar'; x", "x;\n")
 	expectPrintedTS(t, "import type * as foo from 'bar'\nx", "x;\n")
 	expectPrintedTS(t, "import type {foo, bar as baz} from 'bar'; x", "x;\n")
-	expectPrintedTS(t, "import type {foo, bar as baz} from 'bar'\nx", "x;\n")
+	expectPrintedTS(t, "import type {'foo' as bar} from 'bar'\nx", "x;\n")
+	expectPrintedTS(t, "import type foo = require('bar'); x", "x;\n")
+	expectPrintedTS(t, "import type foo = bar.baz; x", "x;\n")
 
 	expectPrintedTS(t, "import type = bar; type", "const type = bar;\ntype;\n")
 	expectPrintedTS(t, "import type = foo.bar; type", "const type = foo.bar;\ntype;\n")
@@ -1484,10 +1469,12 @@ func TestTSTypeOnlyImport(t *testing.T) {
 	expectParseErrorTS(t, "import type", "<stdin>: error: Expected \"from\" but found end of file\n")
 	expectParseErrorTS(t, "import type * foo", "<stdin>: error: Expected \"as\" but found \"foo\"\n")
 	expectParseErrorTS(t, "import type * as 'bar'", "<stdin>: error: Expected identifier but found \"'bar'\"\n")
-	expectParseErrorTS(t, "import type { 'bar'", "<stdin>: error: Expected identifier but found \"'bar'\"\n")
+	expectParseErrorTS(t, "import type { 'bar' }", "<stdin>: error: Expected \"as\" but found \"}\"\n")
 
 	expectParseErrorTS(t, "import type foo, * as foo from 'bar'", "<stdin>: error: Expected \"from\" but found \",\"\n")
 	expectParseErrorTS(t, "import type foo, {foo} from 'bar'", "<stdin>: error: Expected \"from\" but found \",\"\n")
+	expectParseErrorTS(t, "import type * as foo = require('bar')", "<stdin>: error: Expected \"from\" but found \"=\"\n")
+	expectParseErrorTS(t, "import type {foo} = require('bar')", "<stdin>: error: Expected \"from\" but found \"=\"\n")
 }
 
 func TestTSTypeOnlyExport(t *testing.T) {
@@ -1499,14 +1486,14 @@ func TestTSTypeOnlyExport(t *testing.T) {
 	expectParseErrorTS(t, "export type {default}", "<stdin>: error: Expected identifier but found \"default\"\n")
 
 	// Named exports should be removed if they don't refer to a local symbol
-	expectPrintedTS(t, "const Foo = {}; export {Foo}", "const Foo = {};\nexport {Foo};\n")
+	expectPrintedTS(t, "const Foo = {}; export {Foo}", "const Foo = {};\nexport { Foo };\n")
 	expectPrintedTS(t, "type Foo = {}; export {Foo}", "export {};\n")
-	expectPrintedTS(t, "const Foo = {}; export {Foo as Bar}", "const Foo = {};\nexport {Foo as Bar};\n")
+	expectPrintedTS(t, "const Foo = {}; export {Foo as Bar}", "const Foo = {};\nexport { Foo as Bar };\n")
 	expectPrintedTS(t, "type Foo = {}; export {Foo as Bar}", "export {};\n")
-	expectPrintedTS(t, "import Foo from 'foo'; export {Foo}", "import Foo from \"foo\";\nexport {Foo};\n")
-	expectPrintedTS(t, "import {Foo} from 'foo'; export {Foo}", "import {Foo} from \"foo\";\nexport {Foo};\n")
-	expectPrintedTS(t, "import * as Foo from 'foo'; export {Foo}", "import * as Foo from \"foo\";\nexport {Foo};\n")
-	expectPrintedTS(t, "{ var Foo; } export {Foo}", "{\n  var Foo;\n}\nexport {Foo};\n")
+	expectPrintedTS(t, "import Foo from 'foo'; export {Foo}", "import Foo from \"foo\";\nexport { Foo };\n")
+	expectPrintedTS(t, "import {Foo} from 'foo'; export {Foo}", "import { Foo } from \"foo\";\nexport { Foo };\n")
+	expectPrintedTS(t, "import * as Foo from 'foo'; export {Foo}", "import * as Foo from \"foo\";\nexport { Foo };\n")
+	expectPrintedTS(t, "{ var Foo; } export {Foo}", "{\n  var Foo;\n}\nexport { Foo };\n")
 	expectPrintedTS(t, "{ let Foo; } export {Foo}", "{\n  let Foo;\n}\nexport {};\n")
 	expectPrintedTS(t, "export {Foo}", "export {};\n")
 	expectParseError(t, "export {Foo}", "<stdin>: error: \"Foo\" is not declared in this file\n")

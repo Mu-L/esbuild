@@ -153,7 +153,10 @@ mergeVersions('BigInt', { es2020: true })
 mergeVersions('ImportMeta', { es2020: true })
 mergeVersions('NullishCoalescing', { es2020: true })
 mergeVersions('OptionalChain', { es2020: true })
+mergeVersions('LogicalAssignment', { es2021: true })
 mergeVersions('TopLevelAwait', {})
+mergeVersions('ArbitraryModuleNamespaceNames', {})
+mergeVersions('ImportAssertions', {})
 
 // Manually copied from https://caniuse.com/?search=export%20*%20as
 mergeVersions('ExportStarAs', {
@@ -188,6 +191,17 @@ mergeVersions('DynamicImport', {
   ios11: true,
   node13_2: true, // From https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import
   safari11_1: true,
+})
+
+// From https://github.com/tc39/ecma262/pull/2154#issuecomment-825201030
+mergeVersions('ArbitraryModuleNamespaceNames', {
+  chrome90: true,
+  node16: true,
+})
+
+// From https://www.chromestatus.com/feature/5765269513306112
+mergeVersions('ImportAssertions', {
+  chrome91: true,
 })
 
 for (const test of [...es5.tests, ...es6.tests, ...stage4.tests, ...stage1to3.tests]) {

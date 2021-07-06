@@ -17,7 +17,6 @@ export interface BuildRequest {
   absWorkingDir: string;
   incremental: boolean;
   nodePaths: string[];
-  hasOnRebuild: boolean;
   plugins?: BuildPlugin[];
   serve?: ServeRequest;
 }
@@ -127,6 +126,16 @@ export interface FormatMsgsResponse {
   messages: string[];
 }
 
+export interface OnStartRequest {
+  command: 'start';
+  key: number;
+}
+
+export interface OnStartResponse {
+  errors?: types.PartialMessage[];
+  warnings?: types.PartialMessage[];
+}
+
 export interface OnResolveRequest {
   command: 'resolve';
   key: number;
@@ -148,6 +157,7 @@ export interface OnResolveResponse {
 
   path?: string;
   external?: boolean;
+  sideEffects?: boolean;
   namespace?: string;
   pluginData?: number;
 

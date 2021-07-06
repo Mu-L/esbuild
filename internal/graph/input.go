@@ -25,7 +25,8 @@ type InputFile struct {
 	// If this file ends up being used in the bundle, these are additional files
 	// that must be written to the output directory. It's used by the "file"
 	// loader.
-	AdditionalFiles []OutputFile
+	AdditionalFiles        []OutputFile
+	UniqueKeyForFileLoader string
 
 	SideEffects SideEffects
 	Loader      config.Loader
@@ -86,6 +87,16 @@ type JSRepr struct {
 
 func (repr *JSRepr) ImportRecords() *[]ast.ImportRecord {
 	return &repr.AST.ImportRecords
+}
+
+func (repr *JSRepr) TopLevelSymbolToParts(ref js_ast.Ref) []uint32 {
+	// Overlay the mutable map from the linker
+	if parts, ok := repr.Meta.TopLevelSymbolToPartsOverlay[ref]; ok {
+		return parts
+	}
+
+	// Fall back to the immutable map from the parser
+	return repr.AST.TopLevelSymbolToPartsFromParser[ref]
 }
 
 type CSSRepr struct {

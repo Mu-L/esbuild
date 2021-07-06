@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
 	"github.com/evanw/esbuild/internal/js_ast"
+	"github.com/evanw/esbuild/internal/js_lexer"
 	"github.com/evanw/esbuild/internal/logger"
 )
 
@@ -447,8 +449,8 @@ func TestJSXImportsCommonJS(t *testing.T) {
 		options: config.Options{
 			Mode: config.ModeBundle,
 			JSX: config.JSXOptions{
-				Factory:  []string{"elem"},
-				Fragment: []string{"frag"},
+				Factory:  config.JSXExpr{Parts: []string{"elem"}},
+				Fragment: config.JSXExpr{Parts: []string{"frag"}},
 			},
 			AbsOutputFile: "/out.js",
 		},
@@ -471,8 +473,8 @@ func TestJSXImportsES6(t *testing.T) {
 		options: config.Options{
 			Mode: config.ModeBundle,
 			JSX: config.JSXOptions{
-				Factory:  []string{"elem"},
-				Fragment: []string{"frag"},
+				Factory:  config.JSXExpr{Parts: []string{"elem"}},
+				Fragment: config.JSXExpr{Parts: []string{"frag"}},
 			},
 			AbsOutputFile: "/out.js",
 		},
@@ -492,6 +494,45 @@ func TestJSXSyntaxInJS(t *testing.T) {
 			AbsOutputFile: "/out.js",
 		},
 		expectedScanLog: `entry.js: error: Unexpected "<"
+`,
+	})
+}
+
+func TestJSXConstantFragments(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './default'
+				import './null'
+				import './boolean'
+				import './number'
+				import './string-single-empty'
+				import './string-double-empty'
+				import './string-single-punctuation'
+				import './string-double-punctuation'
+				import './string-template'
+			`,
+			"/default.jsx":                   `console.log(<></>)`,
+			"/null.jsx":                      `console.log(<></>) // @jsxFrag null`,
+			"/boolean.jsx":                   `console.log(<></>) // @jsxFrag true`,
+			"/number.jsx":                    `console.log(<></>) // @jsxFrag 123`,
+			"/string-single-empty.jsx":       `console.log(<></>) // @jsxFrag ''`,
+			"/string-double-empty.jsx":       `console.log(<></>) // @jsxFrag ""`,
+			"/string-single-punctuation.jsx": `console.log(<></>) // @jsxFrag '['`,
+			"/string-double-punctuation.jsx": `console.log(<></>) // @jsxFrag "["`,
+			"/string-template.jsx":           `console.log(<></>) // @jsxFrag ` + "``",
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			JSX: config.JSXOptions{
+				Fragment: config.JSXExpr{
+					Constant: &js_ast.EString{Value: js_lexer.StringToUTF16("]")},
+				},
+			},
+		},
+		expectedScanLog: `string-template.jsx: warning: Invalid JSX fragment: ` + "``" + `
 `,
 	})
 }
@@ -866,6 +907,8 @@ func TestConditionalRequireResolve(t *testing.T) {
 		entryPaths: []string{"/a.js"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
+			Platform:      config.PlatformNode,
+			OutputFormat:  config.FormatCommonJS,
 			AbsOutputFile: "/out.js",
 			ExternalModules: config.ExternalModules{
 				NodeModules: map[string]bool{
@@ -1115,6 +1158,7 @@ func TestRequirePropertyAccessCommonJS(t *testing.T) {
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
+			Platform:      config.PlatformNode,
 			OutputFormat:  config.FormatCommonJS,
 			AbsOutputFile: "/out.js",
 		},
@@ -1278,7 +1322,7 @@ func TestRequireFSBrowser(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			Platform:      config.PlatformBrowser,
 		},
-		expectedScanLog: `entry.js: error: Could not resolve "fs" (set platform to "node" when building for node)
+		expectedScanLog: `entry.js: error: Could not resolve "fs" (use "Platform: api.PlatformNode" when building for node)
 `,
 	})
 }
@@ -1335,7 +1379,7 @@ func TestImportFSBrowser(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			Platform:      config.PlatformBrowser,
 		},
-		expectedScanLog: `entry.js: error: Could not resolve "fs" (set platform to "node" when building for node)
+		expectedScanLog: `entry.js: error: Could not resolve "fs" (use "Platform: api.PlatformNode" when building for node)
 `,
 	})
 }
@@ -1396,7 +1440,7 @@ func TestExportFSBrowser(t *testing.T) {
 			AbsOutputFile: "/out.js",
 			Platform:      config.PlatformBrowser,
 		},
-		expectedScanLog: `entry.js: error: Could not resolve "fs" (set platform to "node" when building for node)
+		expectedScanLog: `entry.js: error: Could not resolve "fs" (use "Platform: api.PlatformNode" when building for node)
 `,
 	})
 }
@@ -1577,7 +1621,7 @@ func TestRuntimeNameCollisionNoBundle(t *testing.T) {
 	})
 }
 
-func TestTopLevelReturnAllowedImport(t *testing.T) {
+func TestTopLevelReturnForbiddenImport(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -1590,6 +1634,9 @@ func TestTopLevelReturnAllowedImport(t *testing.T) {
 			Mode:          config.ModePassThrough,
 			AbsOutputFile: "/out.js",
 		},
+		expectedScanLog: `entry.js: error: Top-level return cannot be used inside an ECMAScript module
+entry.js: note: This file is considered an ECMAScript module because of the "import" keyword here
+`,
 	})
 }
 
@@ -1784,6 +1831,43 @@ func TestThisWithES6Syntax(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 		},
+		expectedScanLog: `es6-export-abstract-class.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-abstract-class.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-async-function.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-async-function.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-class.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-class.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-clause-from.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-clause-from.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-clause.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-clause.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-const-enum.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-const-enum.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-default.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-default.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-enum.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-enum.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-function.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-function.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-import-assign.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-import-assign.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-module.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-module.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-namespace.ts: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-namespace.ts: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-star-as.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-star-as.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-star.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-star.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-export-variable.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-export-variable.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+es6-expr-import-meta.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-expr-import-meta.js: note: This file is considered an ECMAScript module because of the "import" keyword here
+es6-import-meta.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-import-meta.js: note: This file is considered an ECMAScript module because of the "import" keyword here
+es6-import-stmt.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+es6-import-stmt.js: note: This file is considered an ECMAScript module because of the "import" keyword here
+`,
 	})
 }
 
@@ -2002,7 +2086,7 @@ func TestImportReExportES6Issue149(t *testing.T) {
 		options: config.Options{
 			Mode: config.ModeBundle,
 			JSX: config.JSXOptions{
-				Factory: []string{"h"},
+				Factory: config.JSXExpr{Parts: []string{"h"}},
 			},
 			AbsOutputFile: "/out.js",
 			ExternalModules: config.ExternalModules{
@@ -2646,7 +2730,8 @@ func TestNoOverwriteInputFileError(t *testing.T) {
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/",
 		},
-		expectedCompileLog: "error: Refusing to overwrite input file: entry.js\n",
+		expectedCompileLog: `error: Refusing to overwrite input file "entry.js" (use "AllowOverwrite: true" to allow this)
+`,
 	})
 }
 
@@ -2884,7 +2969,7 @@ func TestImportMetaNoBundle(t *testing.T) {
 	})
 }
 
-func TestDeduplicateCommentsInBundle(t *testing.T) {
+func TestLegalCommentsNone(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -2898,9 +2983,72 @@ func TestDeduplicateCommentsInBundle(t *testing.T) {
 		},
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
-			Mode:             config.ModeBundle,
-			RemoveWhitespace: true,
-			AbsOutputFile:    "/out.js",
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			LegalComments: config.LegalCommentsNone,
+		},
+	})
+}
+
+func TestLegalCommentsInline(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './a'
+				import './b'
+				import './c'
+			`,
+			"/a.js": `console.log('in a') //! Copyright notice 1`,
+			"/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/c.js": `console.log('in c') //! Copyright notice 2`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			LegalComments: config.LegalCommentsInline,
+		},
+	})
+}
+
+func TestLegalCommentsLinked(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './a'
+				import './b'
+				import './c'
+			`,
+			"/a.js": `console.log('in a') //! Copyright notice 1`,
+			"/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/c.js": `console.log('in c') //! Copyright notice 2`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			LegalComments: config.LegalCommentsLinkedWithComment,
+		},
+	})
+}
+
+func TestLegalCommentsExternal(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './a'
+				import './b'
+				import './c'
+			`,
+			"/a.js": `console.log('in a') //! Copyright notice 1`,
+			"/b.js": `console.log('in b') //! Copyright notice 1`,
+			"/c.js": `console.log('in c') //! Copyright notice 2`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			LegalComments: config.LegalCommentsExternalWithoutComment,
 		},
 	})
 }
@@ -3422,6 +3570,8 @@ func TestRequireResolve(t *testing.T) {
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
+			Platform:      config.PlatformNode,
+			OutputFormat:  config.FormatCommonJS,
 			AbsOutputFile: "/out.js",
 			ExternalModules: config.ExternalModules{
 				AbsPaths: map[string]bool{
@@ -3486,6 +3636,16 @@ func TestInject(t *testing.T) {
 				return &js_ast.EIdentifier{Ref: args.FindSymbol(args.Loc, "replace")}
 			},
 		},
+		"obj.defined": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.EString{Value: js_lexer.StringToUTF16("defined")}
+			},
+		},
+		"injectedAndDefined": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.EString{Value: js_lexer.StringToUTF16("should be used")}
+			},
+		},
 	})
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -3493,6 +3653,8 @@ func TestInject(t *testing.T) {
 				let sideEffects = console.log('this should be renamed')
 				let collide = 123
 				console.log(obj.prop)
+				console.log(obj.defined)
+				console.log(injectedAndDefined)
 				console.log(chain.prop.test)
 				console.log(collide)
 				console.log(re_export)
@@ -3501,6 +3663,7 @@ func TestInject(t *testing.T) {
 				export let obj = {}
 				export let sideEffects = console.log('side effects')
 				export let noSideEffects = /* @__PURE__ */ console.log('side effects')
+				export let injectedAndDefined = 'should not be used'
 			`,
 			"/node_modules/unused/index.js": `
 				console.log('This is unused but still has side effects')
@@ -3553,6 +3716,16 @@ func TestInjectNoBundle(t *testing.T) {
 				return &js_ast.EIdentifier{Ref: args.FindSymbol(args.Loc, "replace")}
 			},
 		},
+		"obj.defined": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.EString{Value: js_lexer.StringToUTF16("defined")}
+			},
+		},
+		"injectedAndDefined": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.EString{Value: js_lexer.StringToUTF16("should be used")}
+			},
+		},
 	})
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -3560,6 +3733,8 @@ func TestInjectNoBundle(t *testing.T) {
 				let sideEffects = console.log('this should be renamed')
 				let collide = 123
 				console.log(obj.prop)
+				console.log(obj.defined)
+				console.log(injectedAndDefined)
 				console.log(chain.prop.test)
 				console.log(collide)
 				console.log(re_export)
@@ -3568,6 +3743,7 @@ func TestInjectNoBundle(t *testing.T) {
 				export let obj = {}
 				export let sideEffects = console.log('side effects')
 				export let noSideEffects = /* @__PURE__ */ console.log('side effects')
+				export let injectedAndDefined = 'should not be used'
 			`,
 			"/node_modules/unused/index.js": `
 				console.log('This is unused but still has side effects')
@@ -3698,6 +3874,30 @@ func TestInjectImportOrder(t *testing.T) {
 	})
 }
 
+func TestInjectAssign(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				test = true
+			`,
+			"/inject.js": `
+				export let test = false
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			InjectAbsPaths: []string{
+				"/inject.js",
+			},
+		},
+		expectedScanLog: `entry.js: error: Cannot assign to "test" because it's an import from an injected file
+inject.js: note: "test" was exported from "inject.js" here
+`,
+	})
+}
+
 func TestOutbase(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -3792,6 +3992,72 @@ func TestDefineImportMeta(t *testing.T) {
 					// This should not be substituted
 					import.meta.bar,
 				)
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			Defines:       &defines,
+		},
+	})
+}
+
+func TestDefineThis(t *testing.T) {
+	defines := config.ProcessDefines(map[string]config.DefineData{
+		"this": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.ENumber{Value: 1}
+			},
+		},
+		"this.foo": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.ENumber{Value: 2}
+			},
+		},
+		"this.foo.bar": {
+			DefineFunc: func(args config.DefineArgs) js_ast.E {
+				return &js_ast.ENumber{Value: 3}
+			},
+		},
+	})
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				ok(
+					// These should be fully substituted
+					this,
+					this.foo,
+					this.foo.bar,
+
+					// Should just substitute "this.foo"
+					this.foo.baz,
+
+					// This should not be substituted
+					this.bar,
+				);
+
+				// This code should be the same as above
+				(() => {
+					ok(
+						this,
+						this.foo,
+						this.foo.bar,
+						this.foo.baz,
+						this.bar,
+					);
+				})();
+
+				// Nothing should be substituted in this code
+				(function() {
+					doNotSubstitute(
+						this,
+						this.foo,
+						this.foo.bar,
+						this.foo.baz,
+						this.bar,
+					);
+				})();
 			`,
 		},
 		entryPaths: []string{"/entry.js"},
@@ -3979,6 +4245,7 @@ func TestRequireMainCacheCommonJS(t *testing.T) {
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
 			Mode:          config.ModeBundle,
+			Platform:      config.PlatformNode,
 			AbsOutputFile: "/out.js",
 			OutputFormat:  config.FormatCommonJS,
 		},
@@ -4052,8 +4319,38 @@ func TestCallImportNamespaceWarning(t *testing.T) {
 				new b()
 				new c()
 			`,
+			"/jsx-components.jsx": `
+				import * as A from "a"
+				import {B} from "b"
+				import C from "c"
+				<A/>;
+				<B/>;
+				<C/>;
+			`,
+			"/jsx-a.jsx": `
+				// @jsx a
+				import * as a from "a"
+				<div/>
+			`,
+			"/jsx-b.jsx": `
+				// @jsx b
+				import {b} from "b"
+				<div/>
+			`,
+			"/jsx-c.jsx": `
+				// @jsx c
+				import c from "c"
+				<div/>
+			`,
 		},
-		entryPaths: []string{"/js.js", "/ts.ts"},
+		entryPaths: []string{
+			"/js.js",
+			"/ts.ts",
+			"/jsx-components.jsx",
+			"/jsx-a.jsx",
+			"/jsx-b.jsx",
+			"/jsx-c.jsx",
+		},
 		options: config.Options{
 			Mode:         config.ModeConvertFormat,
 			AbsOutputDir: "/out",
@@ -4063,6 +4360,10 @@ func TestCallImportNamespaceWarning(t *testing.T) {
 js.js: note: Consider changing "a" to a default import instead
 js.js: warning: Constructing "a" will crash at run-time because it's an import namespace object, not a constructor
 js.js: note: Consider changing "a" to a default import instead
+jsx-a.jsx: warning: Calling "a" will crash at run-time because it's an import namespace object, not a function
+jsx-a.jsx: note: Consider changing "a" to a default import instead
+jsx-components.jsx: warning: Using "A" in a JSX expression will crash at run-time because it's an import namespace object, not a component
+jsx-components.jsx: note: Consider changing "A" to a default import instead
 ts.ts: warning: Calling "a" will crash at run-time because it's an import namespace object, not a function (make sure to enable TypeScript's "esModuleInterop" setting)
 ts.ts: note: Consider changing "a" to a default import instead
 ts.ts: warning: Constructing "a" will crash at run-time because it's an import namespace object, not a constructor (make sure to enable TypeScript's "esModuleInterop" setting)
@@ -4217,6 +4518,145 @@ func TestImportNamespaceThisValue(t *testing.T) {
 					"external": true,
 				},
 			},
+		},
+	})
+}
+
+func TestThisUndefinedWarningESM(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import x from './file1.js'
+				import y from 'pkg/file2.js'
+				console.log(x, y)
+			`,
+			"/file1.js": `
+				export default [this, this]
+			`,
+			"/node_modules/pkg/file2.js": `
+				export default [this, this]
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+		expectedScanLog: `file1.js: warning: Top-level "this" will be replaced with undefined since this file is an ECMAScript module
+file1.js: note: This file is considered an ECMAScript module because of the "export" keyword here
+`,
+	})
+}
+
+func TestQuotedProperty(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import * as ns from 'ext'
+				console.log(ns.mustBeUnquoted, ns['mustBeQuoted'])
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			OutputFormat: config.FormatCommonJS,
+			AbsOutputDir: "/out",
+			ExternalModules: config.ExternalModules{
+				NodeModules: map[string]bool{
+					"ext": true,
+				},
+			},
+		},
+	})
+}
+
+func TestQuotedPropertyMangle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import * as ns from 'ext'
+				console.log(ns.mustBeUnquoted, ns['mustBeUnquoted2'])
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			OutputFormat: config.FormatCommonJS,
+			AbsOutputDir: "/out",
+			MangleSyntax: true,
+			ExternalModules: config.ExternalModules{
+				NodeModules: map[string]bool{
+					"ext": true,
+				},
+			},
+		},
+	})
+}
+
+func TestDuplicatePropertyWarning(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import './outside-node-modules'
+				import 'inside-node-modules'
+			`,
+			"/outside-node-modules/index.js": `
+				console.log({ a: 1, a: 2 })
+			`,
+			"/outside-node-modules/package.json": `
+				{ "b": 1, "b": 2 }
+			`,
+			"/node_modules/inside-node-modules/index.js": `
+				console.log({ c: 1, c: 2 })
+			`,
+			"/node_modules/inside-node-modules/package.json": `
+				{ "d": 1, "d": 2 }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+		},
+		expectedScanLog: `outside-node-modules/index.js: warning: Duplicate key "a" in object literal
+outside-node-modules/index.js: note: The original "a" is here
+outside-node-modules/package.json: warning: Duplicate key "b" in object literal
+outside-node-modules/package.json: note: The original "b" is here
+`,
+	})
+}
+
+func TestRequireShimSubstitution(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				console.log([
+					require,
+					typeof require,
+					require('./example.json'),
+					require('./example.json', { type: 'json' }),
+					require(window.SOME_PATH),
+					module.require('./example.json'),
+					module.require('./example.json', { type: 'json' }),
+					module.require(window.SOME_PATH),
+					require.resolve('some-path'),
+					require.resolve(window.SOME_PATH),
+					import('some-path'),
+					import(window.SOME_PATH),
+				])
+			`,
+			"/example.json": `{ "works": true }`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			ExternalModules: config.ExternalModules{
+				NodeModules: map[string]bool{
+					"some-path": true,
+				},
+			},
+			UnsupportedJSFeatures: compat.DynamicImport,
 		},
 	})
 }

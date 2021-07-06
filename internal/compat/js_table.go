@@ -37,7 +37,8 @@ func (e Engine) String() string {
 type JSFeature uint64
 
 const (
-	ArraySpread JSFeature = 1 << iota
+	ArbitraryModuleNamespaceNames JSFeature = 1 << iota
+	ArraySpread
 	Arrow
 	AsyncAwait
 	AsyncGenerator
@@ -62,6 +63,7 @@ const (
 	ForOf
 	Generator
 	Hashbang
+	ImportAssertions
 	ImportMeta
 	Let
 	LogicalAssignment
@@ -84,6 +86,10 @@ func (features JSFeature) Has(feature JSFeature) bool {
 }
 
 var jsTable = map[JSFeature]map[Engine][]int{
+	ArbitraryModuleNamespaceNames: {
+		Chrome: {90},
+		Node:   {16},
+	},
 	ArraySpread: {
 		Chrome:  {46},
 		Edge:    {13},
@@ -147,39 +153,50 @@ var jsTable = map[JSFeature]map[Engine][]int{
 		Safari:  {14},
 	},
 	ClassPrivateAccessor: {
-		Chrome: {84},
-		Edge:   {84},
-		Node:   {14, 6},
+		Chrome:  {84},
+		Edge:    {84},
+		Firefox: {90},
+		Node:    {14, 6},
+		Safari:  {15},
 	},
 	ClassPrivateBrandCheck: {
-		Chrome: {91},
+		Chrome:  {91},
+		Firefox: {90},
 	},
 	ClassPrivateField: {
-		Chrome: {84},
-		Edge:   {84},
-		Node:   {14, 6},
-		Safari: {14, 1},
+		Chrome:  {84},
+		Edge:    {84},
+		Firefox: {90},
+		Node:    {14, 6},
+		Safari:  {14, 1},
 	},
 	ClassPrivateMethod: {
-		Chrome: {84},
-		Edge:   {84},
-		Node:   {14, 6},
+		Chrome:  {84},
+		Edge:    {84},
+		Firefox: {90},
+		Node:    {14, 6},
+		Safari:  {15},
 	},
 	ClassPrivateStaticAccessor: {
-		Chrome: {84},
-		Edge:   {84},
-		Node:   {14, 6},
+		Chrome:  {84},
+		Edge:    {84},
+		Firefox: {90},
+		Node:    {14, 6},
+		Safari:  {15},
 	},
 	ClassPrivateStaticField: {
-		Chrome: {74},
-		Edge:   {79},
-		Node:   {12, 0},
-		Safari: {14, 1},
+		Chrome:  {74},
+		Edge:    {79},
+		Firefox: {90},
+		Node:    {12, 0},
+		Safari:  {14, 1},
 	},
 	ClassPrivateStaticMethod: {
-		Chrome: {84},
-		Edge:   {84},
-		Node:   {14, 6},
+		Chrome:  {84},
+		Edge:    {84},
+		Firefox: {90},
+		Node:    {14, 6},
+		Safari:  {15},
 	},
 	ClassStaticField: {
 		Chrome:  {73},
@@ -275,6 +292,9 @@ var jsTable = map[JSFeature]map[Engine][]int{
 		Node:    {12, 0},
 		Safari:  {13, 1},
 	},
+	ImportAssertions: {
+		Chrome: {91},
+	},
 	ImportMeta: {
 		Chrome:  {64},
 		Edge:    {79},
@@ -296,6 +316,7 @@ var jsTable = map[JSFeature]map[Engine][]int{
 	LogicalAssignment: {
 		Chrome:  {85},
 		Edge:    {85},
+		ES:      {2021},
 		Firefox: {79},
 		IOS:     {14},
 		Node:    {15, 0},

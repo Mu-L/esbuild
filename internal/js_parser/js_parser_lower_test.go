@@ -11,13 +11,13 @@ func TestLowerFunctionArgumentScope(t *testing.T) {
 		"(function(x = %s) {\n});\n",
 		"function foo(x = %s) {\n}\n",
 
-		"({[%s]: x}) => {\n};\n",
-		"(function({[%s]: x}) {\n});\n",
-		"function foo({[%s]: x}) {\n}\n",
+		"({ [%s]: x }) => {\n};\n",
+		"(function({ [%s]: x }) {\n});\n",
+		"function foo({ [%s]: x }) {\n}\n",
 
-		"({x = %s}) => {\n};\n",
-		"(function({x = %s}) {\n});\n",
-		"function foo({x = %s}) {\n}\n",
+		"({ x = %s }) => {\n};\n",
+		"(function({ x = %s }) {\n});\n",
+		"function foo({ x = %s }) {\n}\n",
 	}
 
 	for _, template := range templates {
@@ -70,6 +70,12 @@ func TestLowerNullishCoalescingAssign(t *testing.T) {
 	expectPrintedTarget(t, 2020, "a().b ??= c", "var _a;\n(_a = a()).b ?? (_a.b = c);\n")
 	expectPrintedTarget(t, 2020, "a[b] ??= c", "a[b] ?? (a[b] = c);\n")
 	expectPrintedTarget(t, 2020, "a()[b()] ??= c", "var _a, _b;\n(_a = a())[_b = b()] ?? (_a[_b] = c);\n")
+
+	expectPrintedTarget(t, 2021, "a ??= b", "a ??= b;\n")
+	expectPrintedTarget(t, 2021, "a.b ??= c", "a.b ??= c;\n")
+	expectPrintedTarget(t, 2021, "a().b ??= c", "a().b ??= c;\n")
+	expectPrintedTarget(t, 2021, "a[b] ??= c", "a[b] ??= c;\n")
+	expectPrintedTarget(t, 2021, "a()[b()] ??= c", "a()[b()] ??= c;\n")
 }
 
 func TestLowerLogicalAssign(t *testing.T) {
@@ -87,6 +93,12 @@ func TestLowerLogicalAssign(t *testing.T) {
 	expectPrintedTarget(t, 2020, "a().b ||= c", "var _a;\n(_a = a()).b || (_a.b = c);\n")
 	expectPrintedTarget(t, 2020, "a[b] ||= c", "a[b] || (a[b] = c);\n")
 	expectPrintedTarget(t, 2020, "a()[b()] ||= c", "var _a, _b;\n(_a = a())[_b = b()] || (_a[_b] = c);\n")
+
+	expectPrintedTarget(t, 2021, "a ||= b", "a ||= b;\n")
+	expectPrintedTarget(t, 2021, "a.b ||= c", "a.b ||= c;\n")
+	expectPrintedTarget(t, 2021, "a().b ||= c", "a().b ||= c;\n")
+	expectPrintedTarget(t, 2021, "a[b] ||= c", "a[b] ||= c;\n")
+	expectPrintedTarget(t, 2021, "a()[b()] ||= c", "a()[b()] ||= c;\n")
 }
 
 func TestLowerAsyncFunctions(t *testing.T) {
@@ -429,6 +441,14 @@ func TestLowerOptionalChain(t *testing.T) {
 	expectPrintedTarget(t, 2019, "delete undefined?.[x]", "true;\n")
 	expectPrintedTarget(t, 2019, "delete undefined?.(x)", "true;\n")
 
+	expectPrintedMangleTarget(t, 2019, "(foo(), null)?.x; y = (bar(), null)?.x", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2019, "(foo(), null)?.[x]; y = (bar(), null)?.[x]", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2019, "(foo(), null)?.(x); y = (bar(), null)?.(x)", "foo(), y = (bar(), void 0);\n")
+
+	expectPrintedMangleTarget(t, 2019, "(foo(), void 0)?.x; y = (bar(), void 0)?.x", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2019, "(foo(), void 0)?.[x]; y = (bar(), void 0)?.[x]", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2019, "(foo(), void 0)?.(x); y = (bar(), void 0)?.(x)", "foo(), y = (bar(), void 0);\n")
+
 	expectPrintedTarget(t, 2020, "x?.y", "x?.y;\n")
 	expectPrintedTarget(t, 2020, "x?.[y]", "x?.[y];\n")
 	expectPrintedTarget(t, 2020, "x?.(y)", "x?.(y);\n")
@@ -440,6 +460,22 @@ func TestLowerOptionalChain(t *testing.T) {
 	expectPrintedTarget(t, 2020, "undefined?.x", "void 0;\n")
 	expectPrintedTarget(t, 2020, "undefined?.[x]", "void 0;\n")
 	expectPrintedTarget(t, 2020, "undefined?.(x)", "void 0;\n")
+
+	expectPrintedTarget(t, 2020, "(foo(), null)?.x", "(foo(), null)?.x;\n")
+	expectPrintedTarget(t, 2020, "(foo(), null)?.[x]", "(foo(), null)?.[x];\n")
+	expectPrintedTarget(t, 2020, "(foo(), null)?.(x)", "(foo(), null)?.(x);\n")
+
+	expectPrintedTarget(t, 2020, "(foo(), void 0)?.x", "(foo(), void 0)?.x;\n")
+	expectPrintedTarget(t, 2020, "(foo(), void 0)?.[x]", "(foo(), void 0)?.[x];\n")
+	expectPrintedTarget(t, 2020, "(foo(), void 0)?.(x)", "(foo(), void 0)?.(x);\n")
+
+	expectPrintedMangleTarget(t, 2020, "(foo(), null)?.x; y = (bar(), null)?.x", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2020, "(foo(), null)?.[x]; y = (bar(), null)?.[x]", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2020, "(foo(), null)?.(x); y = (bar(), null)?.(x)", "foo(), y = (bar(), void 0);\n")
+
+	expectPrintedMangleTarget(t, 2020, "(foo(), void 0)?.x; y = (bar(), void 0)?.x", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2020, "(foo(), void 0)?.[x]; y = (bar(), void 0)?.[x]", "foo(), y = (bar(), void 0);\n")
+	expectPrintedMangleTarget(t, 2020, "(foo(), void 0)?.(x); y = (bar(), void 0)?.(x)", "foo(), y = (bar(), void 0);\n")
 
 	expectPrintedTarget(t, 2019, "a?.b()", "a == null ? void 0 : a.b();\n")
 	expectPrintedTarget(t, 2019, "a?.[b]()", "a == null ? void 0 : a[b]();\n")
@@ -529,5 +565,5 @@ func TestLowerOptionalCatchBinding(t *testing.T) {
 
 func TestLowerExportStarAs(t *testing.T) {
 	expectPrintedTarget(t, 2020, "export * as ns from 'path'", "export * as ns from \"path\";\n")
-	expectPrintedTarget(t, 2019, "export * as ns from 'path'", "import * as ns from \"path\";\nexport {ns};\n")
+	expectPrintedTarget(t, 2019, "export * as ns from 'path'", "import * as ns from \"path\";\nexport { ns };\n")
 }

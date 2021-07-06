@@ -13,6 +13,15 @@ import (
 )
 
 var helpText = func(colors logger.Colors) string {
+	// Read "NO_COLOR" from the environment. This is a convention that some
+	// software follows. See https://no-color.org/ for more information.
+	for _, key := range os.Environ() {
+		if strings.HasPrefix(key, "NO_COLOR=") {
+			colors = logger.Colors{}
+			break
+		}
+	}
+
 	return `
 ` + colors.Bold + `Usage:` + colors.Reset + `
   esbuild [options] [entry points]
@@ -46,6 +55,7 @@ var helpText = func(colors logger.Colors) string {
   --watch               Watch mode: rebuild on file system changes
 
 ` + colors.Bold + `Advanced options:` + colors.Reset + `
+  --allow-overwrite         Allow output files to overwrite input files
   --asset-names=...         Path template to use for "file" loader files
                             (default "[name]-[hash]")
   --banner:T=...            Text to be prepended to each output file of type T
@@ -63,7 +73,11 @@ var helpText = func(colors logger.Colors) string {
                             automatically replace matching globals with imports
   --jsx-factory=...         What to use for JSX instead of React.createElement
   --jsx-fragment=...        What to use for JSX instead of React.Fragment
+  --jsx=...                 Set to "preserve" to disable transforming JSX to JS
   --keep-names              Preserve "name" on functions and classes
+  --legal-comments=...      Where to place license comments (none | inline |
+                            eof | linked | external, default eof when bundling
+                            and inline otherwise)
   --log-level=...           Disable logging (verbose | debug | info | warning |
                             error | silent, default info)
   --log-limit=...           Maximum message count or 0 to disable (default 10)
@@ -116,6 +130,8 @@ var helpText = func(colors logger.Colors) string {
 }
 
 func main() {
+	logger.API = logger.CLIAPI
+
 	osArgs := os.Args[1:]
 	heapFile := ""
 	traceFile := ""
